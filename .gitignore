@@ -1,0 +1,24 @@
+build/
+*.o
+*.out
+*.exe
+*.a
+*.so
+
+*.dSYM/
+*.gcno
+*.gcda
+
+.vscode/
+.idea/
+
+__pycache__/
+*.pyc
+
+# *.csv
+# *.dat
+# *.vtk
+# *.png
+# *.mp4
+
+.DS_Store
