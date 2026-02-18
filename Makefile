@@ -1,17 +1,28 @@
-CXX      = g++
-CXXFLAGS = -std=c++17 -O2 -Wall -Wextra
+CXX := g++
+CXXFLAGS := -O3 -std=c++17 -Iheader
+OMPFLAGS := -fopenmp
 
-SRC = serial.cpp \
-      init.cpp \
-      physics.cpp \
-      solver.cpp \
-      types.cpp \
-      utils.cpp
+COMMON_SRC := \
+  src/init.cpp \
+  src/physics.cpp \
+  src/types.cpp \
+  src/utils.cpp
 
-TARGET = serial
+MAIN_SRC := main.cpp
+SOLVER_SRC := src/solver.cpp
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) $(SRC) -o $(TARGET)
+.PHONY: all serial omp clean
+
+all: serial omp
+
+serial: serial.exe
+omp: omp.exe
+
+serial.exe: $(MAIN_SRC) $(COMMON_SRC) $(SOLVER_SRC)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+omp.exe: $(MAIN_SRC) $(COMMON_SRC) $(SOLVER_SRC)
+	$(CXX) $(CXXFLAGS) $(OMPFLAGS) $^ -o $@
 
 clean:
-	rm -f $(TARGET)
+	rm -f serial.exe omp.exe
