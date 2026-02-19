@@ -1,209 +1,262 @@
+// solver.cpp (no-negative-index MUSCL-Hancock)
 #include "solver.hpp"
 #include "physics.hpp"
-#include "constants.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include <vector>
 
-// ----------------- small helpers on Conserved -----------------
+// ------------------------------
+// Small helpers
+// ------------------------------
 static inline Conserved add(const Conserved& a, const Conserved& b) {
-    return {a.rho + b.rho, a.rhou + b.rhou, a.rhov + b.rhov, a.E + b.E};
+  return {a.rho + b.rho, a.rhou + b.rhou, a.rhov + b.rhov, a.E + b.E};
 }
 static inline Conserved sub(const Conserved& a, const Conserved& b) {
-    return {a.rho - b.rho, a.rhou - b.rhou, a.rhov - b.rhov, a.E - b.E};
+  return {a.rho - b.rho, a.rhou - b.rhou, a.rhov - b.rhov, a.E - b.E};
 }
 static inline Conserved mul(const Conserved& a, double s) {
-    return {a.rho * s, a.rhou * s, a.rhov * s, a.E * s};
+  return {a.rho * s, a.rhou * s, a.rhov * s, a.E * s};
 }
 
-// ----------------- limiter -----------------
 double minmod(double a, double b) {
-    if (a * b <= 0.0) return 0.0;
-    return (std::abs(a) < std::abs(b)) ? a : b;
+  if (a * b <= 0.0) return 0.0;
+  return (std::abs(a) < std::abs(b)) ? a : b;
 }
+
 static inline Conserved minmod_vec(const Conserved& a, const Conserved& b) {
-    return { 
-        minmod(a.rho,b.rho), 
-        minmod(a.rhou,b.rhou),
-        minmod(a.rhov,b.rhov), 
-        minmod(a.E,b.E) 
-    };
+  return {
+    minmod(a.rho,  b.rho),
+    minmod(a.rhou, b.rhou),
+    minmod(a.rhov, b.rhov),
+    minmod(a.E,    b.E)
+  };
 }
 
-// ----------------- boundary conditions -----------------
-void apply_boundary_conditions(Grid& grid) {
-    const int nx_tot = grid.nx + 2 * grid.ng;
-    const int ny_tot = grid.ny + 2 * grid.ng;
-    const int ng = grid.ng;
-
-    for (int j = 0; j < ny_tot; ++j) {
-        for (int g = 0; g < ng; ++g) {
-            grid.U[grid.idx(g, j)] = grid.U[grid.idx(ng, j)];
-            grid.U[grid.idx(nx_tot-1-g, j)] = grid.U[grid.idx(nx_tot-1-ng, j)];
-        }
-    }
-
-    for (int i = 0; i < nx_tot; ++i) {
-        for (int g = 0; g < ng; ++g) {
-            grid.U[grid.idx(i, g)] = grid.U[grid.idx(i, ng)];
-            grid.U[grid.idx(i, ny_tot-1-g)] = grid.U[grid.idx(i, ny_tot-1-ng)];
-        }
-    }
-}
-
-// ----------------- CFL timestep -----------------
+// ------------------------------
+// CFL timestep (basic: dt = cfl*min(dx,dy)/max(|v|+cs))
+// ------------------------------
 double compute_dt(const Grid& grid, double cfl) {
-    const int ng = grid.ng;
-    const int i0 = ng, i1 = ng + grid.nx - 1;
-    const int j0 = ng, j1 = ng + grid.ny - 1;
+  const int nx = grid.nx;
+  const int ny = grid.ny;
 
-    double max_lambda = 0.0;
+  const double h = std::min(grid.dx, grid.dy);
 
-    // Parallelize over cells, reduce max_lambda
-    #pragma omp parallel for collapse(2) reduction(max:max_lambda) schedule(static)
-    for (int j = j0; j <= j1; ++j) {
-        for (int i = i0; i <= i1; ++i) {
-            const Primitive W = conserved_to_primitive(grid.U[grid.idx(i, j)]);
-            const double a = std::sqrt(phys::gamma * W.p / W.rho);
-            const double sx = (std::abs(W.u) + a) / grid.dx;
-            const double sy = (std::abs(W.v) + a) / grid.dy;
-            max_lambda = std::max(max_lambda, sx + sy);
-        }
+  double amax = 0.0;
+  for (int j = 0; j < ny; ++j) {
+    for (int i = 0; i < nx; ++i) {
+      const Conserved& U = grid.U[ grid.idx(i,j) ];
+      const Primitive W  = conserved_to_primitive(U);
+      const double vmag  = std::sqrt(W.u*W.u + W.v*W.v);
+      const double cs    = sound_speed(W);
+      amax = std::max(amax, vmag + cs);
     }
-
-    if (max_lambda <= 0.0) return std::numeric_limits<double>::infinity();
-    return cfl / max_lambda;
+  }
+  if (amax <= 0.0) return 1e-12;
+  return cfl * h / amax;
 }
 
-// ----------------- MUSCL slopes -----------------
-static inline Conserved slope_x_safe(const Grid& grid, int i, int j) {
-    const int nx_tot = grid.nx + 2 * grid.ng;
-    if (i <= 0 || i >= nx_tot - 1) return {0,0,0,0};
-
-    const Conserved& Um = grid.U[grid.idx(i - 1, j)];
-    const Conserved& U0 = grid.U[grid.idx(i, j)];
-    const Conserved& Up = grid.U[grid.idx(i + 1, j)];
-    return minmod_vec(sub(U0, Um), sub(Up, U0));
-}
-static inline Conserved slope_y_safe(const Grid& grid, int i, int j) {
-    const int ny_tot = grid.ny + 2 * grid.ng;
-    if (j <= 0 || j >= ny_tot - 1) return {0,0,0,0};
-
-    const Conserved& Um = grid.U[grid.idx(i, j - 1)];
-    const Conserved& U0 = grid.U[grid.idx(i, j)];
-    const Conserved& Up = grid.U[grid.idx(i, j + 1)];
-    return minmod_vec(sub(U0, Um), sub(Up, U0));
+// ------------------------------
+// Boundary conditions
+// NOTE: With this solver, BCs are enforced WITHOUT ghost cells.
+// So this function can be empty or kept for other parts.
+// We'll keep it as a no-op to avoid negative index usage.
+// ------------------------------
+void apply_boundary_conditions(Grid&) {
+  // no-op: BC handled in flux assembly below
 }
 
-// ----------------- RHS computation -----------------
+// ------------------------------
+// Optional RHS not used here
+// ------------------------------
 void compute_rhs(const Grid& grid, std::vector<Conserved>& rhs) {
-    const int nx_tot = grid.nx + 2 * grid.ng;
-    const int ny_tot = grid.ny + 2 * grid.ng;
-    const int ng = grid.ng;
-
-    rhs.assign(nx_tot * ny_tot, Conserved{0,0,0,0});
-
-    std::vector<Conserved> Fx((nx_tot + 1) * ny_tot);
-    std::vector<Conserved> Gy(nx_tot * (ny_tot + 1));
-
-    auto Fx_idx = [&](int iface, int j) { return iface + (nx_tot + 1) * j; };
-    auto Gy_idx = [&](int i, int jf) { return i + nx_tot * jf; };
-
-    const int iface0 = ng;
-    const int iface1 = ng + grid.nx;
-    const int jface0 = ng;
-    const int jface1 = ng + grid.ny;
-
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int j = 0; j < ny_tot; ++j) {
-        for (int iface = iface0; iface <= iface1; ++iface) {
-            const int iL = iface - 1;
-            const int iR = iface;
-
-            const Conserved ULc = grid.U[grid.idx(iL, j)];
-            const Conserved URc = grid.U[grid.idx(iR, j)];
-
-            const Conserved sxL = slope_x_safe(grid, iL, j);
-            const Conserved sxR = slope_x_safe(grid, iR, j);
-
-            const Conserved UL = add(ULc, mul(sxL, 0.5));
-            const Conserved UR = sub(URc, mul(sxR, 0.5));
-
-            Fx[Fx_idx(iface, j)] = hll_flux_x(UL, UR);
-        }
-    }
-
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < nx_tot; ++i) {
-        for (int jface = jface0; jface <= jface1; ++jface) {
-            const int jB = jface - 1;
-            const int jT = jface;
-
-            const Conserved UBc = grid.U[grid.idx(i, jB)];
-            const Conserved UTc = grid.U[grid.idx(i, jT)];
-
-            const Conserved syB = slope_y_safe(grid, i, jB);
-            const Conserved syT = slope_y_safe(grid, i, jT);
-
-            const Conserved UL = add(UBc, mul(syB, 0.5));
-            const Conserved UR = sub(UTc, mul(syT, 0.5));
-
-            Gy[Gy_idx(i, jface)] = hll_flux_y(UL, UR);
-        }
-    }
-
-    const int i0 = ng, i1 = ng + grid.nx - 1;
-    const int j0 = ng, j1 = ng + grid.ny - 1;
-
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int j = j0; j <= j1; ++j) {
-        for (int i = i0; i <= i1; ++i) {
-            const Conserved Fr = Fx[Fx_idx(i + 1, j)];
-            const Conserved Fl = Fx[Fx_idx(i,     j)];
-            const Conserved Gt = Gy[Gy_idx(i, j + 1)];
-            const Conserved Gb = Gy[Gy_idx(i, j    )];
-
-            Conserved dudt{0,0,0,0};
-            dudt = sub(dudt, mul(sub(Fr, Fl), 1.0 / grid.dx));
-            dudt = sub(dudt, mul(sub(Gt, Gb), 1.0 / grid.dy));
-
-            rhs[grid.idx(i, j)] = dudt;
-        }
-    }
+  rhs.assign(grid.U.size(), Conserved{0,0,0,0});
 }
 
-// ----------------- RK2 time stepping -----------------
+// ------------------------------
+// MUSCL-Hancock (Toro-style) without ghost / negative indexing
+// ------------------------------
+namespace {
+struct Workspace {
+  int nx = -1, ny = -1;
+  std::size_t nU = 0;
+
+  std::vector<Conserved> Umx, Upx, Umy, Upy;
+  std::vector<Conserved> Uhat_mx, Uhat_px, Uhat_my, Uhat_py;
+
+  // Interface fluxes on domain boundaries included:
+  // Fx: (nx+1)*ny corresponds to i=0..nx (left boundary to right boundary)
+  // Gy: nx*(ny+1) corresponds to j=0..ny
+  std::vector<Conserved> Fx, Gy;
+
+  void ensure(const Grid& grid) {
+    if (grid.nx == nx && grid.ny == ny && grid.U.size() == nU) return;
+    nx = grid.nx; ny = grid.ny; nU = grid.U.size();
+    Umx.resize(nU); Upx.resize(nU); Umy.resize(nU); Upy.resize(nU);
+    Uhat_mx.resize(nU); Uhat_px.resize(nU); Uhat_my.resize(nU); Uhat_py.resize(nU);
+    Fx.resize((nx+1) * ny);
+    Gy.resize(nx * (ny+1));
+  }
+};
+
+static Workspace ws;
+
+static inline std::size_t fx_id(int nx, int iface_i, int j) {
+  return static_cast<std::size_t>(iface_i + (nx+1)*j);
+}
+static inline std::size_t gy_id(int nx, int i, int iface_j) {
+  return static_cast<std::size_t>(i + nx*iface_j);
+}
+
+// Safe accessors for neighbor cell indices WITHOUT negative indexing.
+// For transmissive BC, out-of-range neighbor uses nearest in-range cell.
+static inline int clamp_i(int i, int nx) { return std::max(0, std::min(nx-1, i)); }
+static inline int clamp_j(int j, int ny) { return std::max(0, std::min(ny-1, j)); }
+
+} // namespace
+
 void advance_one_step(Grid& grid, double dt) {
-    apply_boundary_conditions(grid);
+  const int nx = grid.nx;
+  const int ny = grid.ny;
 
-    std::vector<Conserved> k1;
-    compute_rhs(grid, k1);
+  ws.ensure(grid);
 
-    Grid tmp = grid;
+  const double half = 0.5;
+  const double cx   = dt / (2.0 * grid.dx);
+  const double cy   = dt / (2.0 * grid.dy);
 
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int j = grid.ng; j < grid.ng + grid.ny; ++j) {
-        for (int i = grid.ng; i < grid.ng + grid.nx; ++i) {
-            tmp.U[tmp.idx(i, j)] = add(grid.U[grid.idx(i, j)], mul(k1[grid.idx(i, j)], dt));
-        }
+  // ------------------------------------------------------------
+  // (I) Reconstruction slopes using clamped neighbors (transmissive BC)
+  // Build Umx/Upx/Umy/Upy for every cell (0..nx-1,0..ny-1)
+  // ------------------------------------------------------------
+  for (int j = 0; j < ny; ++j) {
+    for (int i = 0; i < nx; ++i) {
+      const auto id = grid.idx(i,j);
+      const Conserved& Uc = grid.U[id];
+
+      // neighbor indices clamped to domain for transmissive BC
+      const int il = clamp_i(i-1, nx);
+      const int ir = clamp_i(i+1, nx);
+      const int jb = clamp_j(j-1, ny);
+      const int jt = clamp_j(j+1, ny);
+
+      const Conserved& Ul = grid.U[ grid.idx(il, j) ];
+      const Conserved& Ur = grid.U[ grid.idx(ir, j) ];
+      const Conserved& Ub = grid.U[ grid.idx(i, jb) ];
+      const Conserved& Ut = grid.U[ grid.idx(i, jt) ];
+
+      const Conserved sx = minmod_vec(sub(Uc, Ul), sub(Ur, Uc));
+      const Conserved sy = minmod_vec(sub(Uc, Ub), sub(Ut, Uc));
+
+      const Conserved Umx = sub(Uc, mul(sx, half));
+      const Conserved Upx = add(Uc, mul(sx, half));
+      const Conserved Umy = sub(Uc, mul(sy, half));
+      const Conserved Upy = add(Uc, mul(sy, half));
+
+      ws.Umx[id] = Umx; ws.Upx[id] = Upx;
+      ws.Umy[id] = Umy; ws.Upy[id] = Upy;
+
+      // --------------------------------------------------------
+      // (II) Hancock half-step predictor (uses physical fluxes)
+      // Uhat^l = U^l + cx(F(Umx)-F(Upx)) + cy(G(Umy)-G(Upy))
+      // --------------------------------------------------------
+      const Conserved dF = sub(flux_x(Umx), flux_x(Upx));
+      const Conserved dG = sub(flux_y(Umy), flux_y(Upy));
+      const Conserved corr = add(mul(dF, cx), mul(dG, cy));
+
+      ws.Uhat_mx[id] = add(Umx, corr);
+      ws.Uhat_px[id] = add(Upx, corr);
+      ws.Uhat_my[id] = add(Umy, corr);
+      ws.Uhat_py[id] = add(Upy, corr);
     }
+  }
 
-    apply_boundary_conditions(tmp);
+  // ------------------------------------------------------------
+  // (III) Interface HLL fluxes (include boundary interfaces)
+  // Boundary interfaces use transmissive BC:
+  //   left boundary i=0: UL from cell(0), UR from cell(0)
+  //   right boundary i=nx: UL from cell(nx-1), UR from cell(nx-1)
+  // similar for bottom/top.
+  // ------------------------------------------------------------
 
-    std::vector<Conserved> k2;
-    compute_rhs(tmp, k2);
+  // x-interfaces: i = 0..nx
+  for (int j = 0; j < ny; ++j) {
+    for (int iface = 0; iface <= nx; ++iface) {
+      Conserved UL, UR;
 
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int j = grid.ng; j < grid.ng + grid.ny; ++j) {
-        for (int i = grid.ng; i < grid.ng + grid.nx; ++i) {
-            const Conserved avg = add(k1[grid.idx(i, j)], k2[grid.idx(i, j)]);
-            grid.U[grid.idx(i, j)] = add(grid.U[grid.idx(i, j)], mul(avg, 0.5 * dt));
-        }
+      if (iface == 0) {
+        // left boundary: interface between outside and cell 0
+        const auto id0 = grid.idx(0, j);
+        UL = ws.Uhat_px[id0];
+        UR = ws.Uhat_mx[id0];
+      } else if (iface == nx) {
+        // right boundary: interface between cell nx-1 and outside
+        const auto idN = grid.idx(nx-1, j);
+        UL = ws.Uhat_px[idN];
+        UR = ws.Uhat_mx[idN];
+      } else {
+        // interior interface between cell iface-1 and iface
+        const auto idL = grid.idx(iface-1, j);
+        const auto idR = grid.idx(iface,   j);
+        UL = ws.Uhat_px[idL];
+        UR = ws.Uhat_mx[idR];
+      }
+
+      ws.Fx[ fx_id(nx, iface, j) ] = hll_flux_x(UL, UR);
     }
+  }
 
-    apply_boundary_conditions(grid);
+  // y-interfaces: j = 0..ny
+  for (int iface = 0; iface <= ny; ++iface) {
+    for (int i = 0; i < nx; ++i) {
+      Conserved UL, UR;
+
+      if (iface == 0) {
+        // bottom boundary
+        const auto id0 = grid.idx(i, 0);
+        UL = ws.Uhat_py[id0];
+        UR = ws.Uhat_my[id0];
+      } else if (iface == ny) {
+        // top boundary
+        const auto idN = grid.idx(i, ny-1);
+        UL = ws.Uhat_py[idN];
+        UR = ws.Uhat_my[idN];
+      } else {
+        // interior interface between cell iface-1 and iface
+        const auto idB = grid.idx(i, iface-1);
+        const auto idT = grid.idx(i, iface);
+        UL = ws.Uhat_py[idB];
+        UR = ws.Uhat_my[idT];
+      }
+
+      ws.Gy[ gy_id(nx, i, iface) ] = hll_flux_y(UL, UR);
+    }
+  }
+
+  // ------------------------------------------------------------
+  // FV update (in-place)
+  // U_{i,j}^{n+1} = U_{i,j}^n - dtdx(F_{i+1/2}-F_{i-1/2}) - dtdy(G_{j+1/2}-G_{j-1/2})
+  // where:
+  //   F_{i-1/2} is Fx[iface=i], F_{i+1/2} is Fx[iface=i+1]
+  //   G_{j-1/2} is Gy[iface=j], G_{j+1/2} is Gy[iface=j+1]
+  // ------------------------------------------------------------
+  const double dtdx = dt / grid.dx;
+  const double dtdy = dt / grid.dy;
+
+  for (int j = 0; j < ny; ++j) {
+    for (int i = 0; i < nx; ++i) {
+      const Conserved& F_im = ws.Fx[ fx_id(nx, i,   j) ];
+      const Conserved& F_ip = ws.Fx[ fx_id(nx, i+1, j) ];
+
+      const Conserved& G_jm = ws.Gy[ gy_id(nx, i, j) ];
+      const Conserved& G_jp = ws.Gy[ gy_id(nx, i, j+1) ];
+
+      const Conserved update =
+        add(mul(sub(F_ip, F_im), dtdx),
+            mul(sub(G_jp, G_jm), dtdy));
+
+      const auto id = grid.idx(i, j);
+      grid.U[id] = sub(grid.U[id], update);
+    }
+  }
 }

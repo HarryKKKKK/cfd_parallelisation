@@ -143,3 +143,10 @@ Conserved hll_flux_y(const Conserved& UL, const Conserved& UR) {
 
     return GH;
 }
+double sound_speed(const Primitive& W)
+{
+    const double rho = std::max(W.rho, 1e-14);
+    const double p   = std::max(W.p,   1e-14);
+
+    return std::sqrt(phys::gamma * p / rho);
+}

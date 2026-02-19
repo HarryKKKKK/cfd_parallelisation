@@ -21,8 +21,8 @@ omp: omp.exe
 serial.exe: $(MAIN_SRC) $(COMMON_SRC) $(SOLVER_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-omp.exe: $(MAIN_SRC) $(COMMON_SRC) $(SOLVER_SRC)
-	$(CXX) $(CXXFLAGS) $(OMPFLAGS) $^ -o $@
+# omp.exe: $(MAIN_SRC) $(COMMON_SRC) $(SOLVER_SRC)
+# 	$(CXX) $(CXXFLAGS) $(OMPFLAGS) $^ -o $@
 
 clean:
 	rm -f serial.exe omp.exe

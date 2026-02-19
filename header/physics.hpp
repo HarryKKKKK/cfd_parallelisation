@@ -16,3 +16,4 @@ double pressure_from_conserved(const Conserved& U);
 double sound_speed_from_conserved(const Conserved& U);
 double max_wave_speed_x(const Conserved& U);
 double max_wave_speed_y(const Conserved& U);
+double sound_speed(const Primitive& W);

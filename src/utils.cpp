@@ -2,6 +2,7 @@
 #include "physics.hpp"   
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 
 void write_grid_csv(const Grid& grid,
                     const std::string& filename)
@@ -31,6 +32,7 @@ void write_grid_csv(const Grid& grid,
     }
 
     file.close();
+    std::cout << "Wrote: " << filename << "\n";
 }
 
 std::string make_filename(const std::string& dir, int step, double t) {

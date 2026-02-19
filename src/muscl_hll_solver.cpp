@@ -1,11 +1,13 @@
 #include "solver.hpp"
 #include "physics.hpp"
 #include "constants.hpp"
-#include "utils.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // ----------------- small helpers on Conserved -----------------
 static inline Conserved add(const Conserved& a, const Conserved& b) {
@@ -23,20 +25,17 @@ double minmod(double a, double b) {
     if (a * b <= 0.0) return 0.0;
     return (std::abs(a) < std::abs(b)) ? a : b;
 }
-
 static inline Conserved minmod_vec(const Conserved& a, const Conserved& b) {
-    return {
-        minmod(a.rho, b.rho),
-        minmod(a.rhou, b.rhou),
-        minmod(a.rhov, b.rhov),
-        minmod(a.E, b.E)
+    return { 
+        minmod(a.rho,b.rho), 
+        minmod(a.rhou,b.rhou),
+        minmod(a.rhov,b.rhov), 
+        minmod(a.E,b.E) 
     };
 }
 
 // ----------------- boundary conditions -----------------
 void apply_boundary_conditions(Grid& grid) {
-    DBG_PRINT("apply boundary conditions");
-
     const int nx_tot = grid.nx + 2 * grid.ng;
     const int ny_tot = grid.ny + 2 * grid.ng;
     const int ng = grid.ng;
@@ -58,23 +57,21 @@ void apply_boundary_conditions(Grid& grid) {
 
 // ----------------- CFL timestep -----------------
 double compute_dt(const Grid& grid, double cfl) {
-    DBG_PRINT("computing dt");
-
     const int ng = grid.ng;
     const int i0 = ng, i1 = ng + grid.nx - 1;
     const int j0 = ng, j1 = ng + grid.ny - 1;
 
     double max_lambda = 0.0;
 
+    // Parallelize over cells, reduce max_lambda
+    #pragma omp parallel for collapse(2) reduction(max:max_lambda) schedule(static)
     for (int j = j0; j <= j1; ++j) {
         for (int i = i0; i <= i1; ++i) {
             const Primitive W = conserved_to_primitive(grid.U[grid.idx(i, j)]);
             const double a = std::sqrt(phys::gamma * W.p / W.rho);
-            max_lambda = std::max(
-                max_lambda,
-                (std::abs(W.u) + a) / grid.dx +
-                (std::abs(W.v) + a) / grid.dy
-            );
+            const double sx = (std::abs(W.u) + a) / grid.dx;
+            const double sy = (std::abs(W.v) + a) / grid.dy;
+            max_lambda = std::max(max_lambda, sx + sy);
         }
     }
 
@@ -92,7 +89,6 @@ static inline Conserved slope_x_safe(const Grid& grid, int i, int j) {
     const Conserved& Up = grid.U[grid.idx(i + 1, j)];
     return minmod_vec(sub(U0, Um), sub(Up, U0));
 }
-
 static inline Conserved slope_y_safe(const Grid& grid, int i, int j) {
     const int ny_tot = grid.ny + 2 * grid.ng;
     if (j <= 0 || j >= ny_tot - 1) return {0,0,0,0};
@@ -105,8 +101,6 @@ static inline Conserved slope_y_safe(const Grid& grid, int i, int j) {
 
 // ----------------- RHS computation -----------------
 void compute_rhs(const Grid& grid, std::vector<Conserved>& rhs) {
-    DBG_PRINT("computing rhs");
-
     const int nx_tot = grid.nx + 2 * grid.ng;
     const int ny_tot = grid.ny + 2 * grid.ng;
     const int ng = grid.ng;
@@ -124,10 +118,11 @@ void compute_rhs(const Grid& grid, std::vector<Conserved>& rhs) {
     const int jface0 = ng;
     const int jface1 = ng + grid.ny;
 
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int j = 0; j < ny_tot; ++j) {
         for (int iface = iface0; iface <= iface1; ++iface) {
-            int iL = iface - 1;
-            int iR = iface;
+            const int iL = iface - 1;
+            const int iR = iface;
 
             const Conserved ULc = grid.U[grid.idx(iL, j)];
             const Conserved URc = grid.U[grid.idx(iR, j)];
@@ -142,10 +137,11 @@ void compute_rhs(const Grid& grid, std::vector<Conserved>& rhs) {
         }
     }
 
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < nx_tot; ++i) {
         for (int jface = jface0; jface <= jface1; ++jface) {
-            int jB = jface - 1;
-            int jT = jface;
+            const int jB = jface - 1;
+            const int jT = jface;
 
             const Conserved UBc = grid.U[grid.idx(i, jB)];
             const Conserved UTc = grid.U[grid.idx(i, jT)];
@@ -160,40 +156,54 @@ void compute_rhs(const Grid& grid, std::vector<Conserved>& rhs) {
         }
     }
 
-    for (int j = ng; j < ng + grid.ny; ++j) {
-        for (int i = ng; i < ng + grid.nx; ++i) {
-            rhs[grid.idx(i,j)] =
-                sub(
-                    sub({0,0,0,0}, mul(sub(Fx[Fx_idx(i+1,j)], Fx[Fx_idx(i,j)]), 1.0/grid.dx)),
-                    mul(sub(Gy[Gy_idx(i,j+1)], Gy[Gy_idx(i,j)]), 1.0/grid.dy)
-                );
+    const int i0 = ng, i1 = ng + grid.nx - 1;
+    const int j0 = ng, j1 = ng + grid.ny - 1;
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int j = j0; j <= j1; ++j) {
+        for (int i = i0; i <= i1; ++i) {
+            const Conserved Fr = Fx[Fx_idx(i + 1, j)];
+            const Conserved Fl = Fx[Fx_idx(i,     j)];
+            const Conserved Gt = Gy[Gy_idx(i, j + 1)];
+            const Conserved Gb = Gy[Gy_idx(i, j    )];
+
+            Conserved dudt{0,0,0,0};
+            dudt = sub(dudt, mul(sub(Fr, Fl), 1.0 / grid.dx));
+            dudt = sub(dudt, mul(sub(Gt, Gb), 1.0 / grid.dy));
+
+            rhs[grid.idx(i, j)] = dudt;
         }
     }
 }
 
 // ----------------- RK2 time stepping -----------------
 void advance_one_step(Grid& grid, double dt) {
-    DBG_PRINT("advance one step");
-
     apply_boundary_conditions(grid);
 
     std::vector<Conserved> k1;
     compute_rhs(grid, k1);
 
     Grid tmp = grid;
-    for (int j = grid.ng; j < grid.ng + grid.ny; ++j)
-        for (int i = grid.ng; i < grid.ng + grid.nx; ++i)
-            tmp.U[tmp.idx(i,j)] = add(grid.U[grid.idx(i,j)], mul(k1[grid.idx(i,j)], dt));
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int j = grid.ng; j < grid.ng + grid.ny; ++j) {
+        for (int i = grid.ng; i < grid.ng + grid.nx; ++i) {
+            tmp.U[tmp.idx(i, j)] = add(grid.U[grid.idx(i, j)], mul(k1[grid.idx(i, j)], dt));
+        }
+    }
 
     apply_boundary_conditions(tmp);
 
     std::vector<Conserved> k2;
     compute_rhs(tmp, k2);
 
-    for (int j = grid.ng; j < grid.ng + grid.ny; ++j)
-        for (int i = grid.ng; i < grid.ng + grid.nx; ++i)
-            grid.U[grid.idx(i,j)] =
-                add(grid.U[grid.idx(i,j)], mul(add(k1[grid.idx(i,j)], k2[grid.idx(i,j)]), 0.5*dt));
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int j = grid.ng; j < grid.ng + grid.ny; ++j) {
+        for (int i = grid.ng; i < grid.ng + grid.nx; ++i) {
+            const Conserved avg = add(k1[grid.idx(i, j)], k2[grid.idx(i, j)]);
+            grid.U[grid.idx(i, j)] = add(grid.U[grid.idx(i, j)], mul(avg, 0.5 * dt));
+        }
+    }
 
     apply_boundary_conditions(grid);
 }
