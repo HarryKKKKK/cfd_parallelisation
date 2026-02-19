@@ -8,6 +8,10 @@
 #include <iostream>
 #include <string>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // =============================
 //   OUTPUT CONTROL SWITCH
 // =============================
@@ -18,6 +22,14 @@ int main() {
 
 #ifdef _OPENMP
     const std::string out_dir = "res/omp";
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+        std::cout << "OpenMP max threads = " << omp_get_max_threads() << "\n";
+        std::cout << "OpenMP num threads = " << omp_get_num_threads() << "\n";
+        }
+    }
 #else
     const std::string out_dir = "res/serial";
 #endif
