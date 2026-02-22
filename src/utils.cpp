@@ -2,6 +2,7 @@
 #include "physics.hpp"   
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 
 void write_grid_csv(const Grid& grid,
                     const std::string& filename)
@@ -31,6 +32,7 @@ void write_grid_csv(const Grid& grid,
     }
 
     file.close();
+    std::cout << "Wrote: " << filename << "\n";
 }
 
 std::string make_filename(const std::string& dir, int step, double t) {
@@ -38,4 +40,41 @@ std::string make_filename(const std::string& dir, int step, double t) {
     oss << dir << "/step_" << std::setw(6) << std::setfill('0') << step
         << "_t_" << std::fixed << std::setprecision(6) << t << ".csv";
     return oss.str();
+}
+
+double check_symmetry(const Grid& grid, double t, bool verbose = true)
+{
+    const int nx = grid.nx;
+    const int ny = grid.ny;
+    const int ng = grid.ng;
+
+    double max_err = 0.0;
+
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+
+            const int I1 = i + ng;
+            const int J1 = j + ng;
+
+            const int I2 = i + ng;
+            const int J2 = (ny - 1 - j) + ng;
+
+            const double rho1 = grid.U[grid.idx(I1, J1)].rho;
+            const double rho2 = grid.U[grid.idx(I2, J2)].rho;
+
+            const double err = std::abs(rho1 - rho2);
+
+            if (err > max_err)
+                max_err = err;
+        }
+    }
+
+    if (verbose) {
+        std::cout << "Symmetry check at t = "
+                  << t
+                  << " : max |rho - rho_flip| = "
+                  << max_err << std::endl;
+    }
+
+    return max_err;
 }

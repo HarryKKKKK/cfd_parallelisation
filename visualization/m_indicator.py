@@ -3,20 +3,40 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 import math
+import argparse
+import os
+
+# =============================
+# command line argument
+# =============================
+parser = argparse.ArgumentParser(
+    description="Plot exponential density-gradient indicator"
+)
+parser.add_argument(
+    "mode",
+    choices=["serial", "omp", "mpi"],
+    help="Select which result folder to use"
+)
+
+args = parser.parse_args()
+csv_dir = f"res/{args.mode}"
 
 # =============================
 # settings
 # =============================
-csv_dir = "res/serial"
 n_panels = 10
 ncols = 2
-C = 200.0          # scaling constant in exp(-|grad rho| / C)
+C = 200.0
 cmap = "gray"
 
 # =============================
 # load csv files
 # =============================
 files = sorted(glob.glob(f"{csv_dir}/step_*.csv"))
+
+if len(files) < n_panels:
+    raise ValueError("Not enough CSV files in folder")
+
 indices = np.linspace(0, len(files) - 1, n_panels, dtype=int)
 files = [files[i] for i in indices]
 
@@ -75,15 +95,21 @@ for k, (ax, fname) in enumerate(zip(axes, files)):
     ax.set_xticks([])
     ax.set_yticks([])
 
+# hide unused axes
 for ax in axes[len(files):]:
     ax.axis("off")
 
+# colorbar
 cbar = fig.colorbar(im, ax=axes, shrink=0.9)
 cbar.set_label(r"$M = \exp(-|\nabla \rho| / 200)$")
 
 fig.suptitle(
-    "Shock–Bubble Interaction: Exponential Density-Gradient Indicator",
+    f"Shock–Bubble Interaction ({args.mode.upper()}): "
+    "Exponential Density-Gradient Indicator",
     fontsize=16
 )
 
-plt.savefig(f"{csv_dir}/m_indicator.png", dpi=300)
+output_file = os.path.join(csv_dir, f"m_indicator_{args.mode}.png")
+plt.savefig(output_file, dpi=300)
+
+print(f"Saved plot to {output_file}")

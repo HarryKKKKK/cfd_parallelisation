@@ -5,18 +5,38 @@
 #include "utils.hpp"
 
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <string>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// =============================
+//   OUTPUT CONTROL SWITCH
+// =============================
+
+constexpr bool ENABLE_OUTPUT = true;
+
 int main() {
-    #ifdef _OPENMP
-        const std::string out_dir = "res/omp";
-    #else
-        const std::string out_dir = "res/serial";
-    #endif
-    std::filesystem::create_directories(out_dir);
+
+#ifdef _OPENMP
+    const std::string out_dir = "res/omp";
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+        std::cout << "OpenMP max threads = " << omp_get_max_threads() << "\n";
+        std::cout << "OpenMP num threads = " << omp_get_num_threads() << "\n";
+        }
+    }
+#else
+    const std::string out_dir = "res/serial";
+#endif
+
+    if (ENABLE_OUTPUT) {
+        std::filesystem::create_directories(out_dir);
+    }
 
     // ----------------- Init grid -----------------
     Grid grid;
@@ -27,36 +47,37 @@ int main() {
     int step = 0;
     double t = 0.0;
 
-    // Write t=0
-    write_grid_csv(grid, make_filename(out_dir, step, t));
-    std::cout << "Wrote: " << make_filename(out_dir, step, t) << "\n";
+    if (ENABLE_OUTPUT) {
+        write_grid_csv(grid, make_filename(out_dir, step, t));
+    }
 
     // ----------------- time loop settings -----------------
     const double t_end = 0.0011741;
-    const double cfl   = 0.5;
+    const double cfl   = 0.4;
 
-    // output frequency related
     const int n_outputs = 10;
-    const double output_dt = t_end / (n_outputs-1);
+    const double output_dt = t_end / (n_outputs - 1);
     double next_output_t = output_dt;
 
     // ----------------- Main loop -----------------
+    double dt = compute_dt(grid, cfl);
     while (t < t_end) {
-        double dt = compute_dt(grid, cfl);
         if (t + dt > t_end) dt = t_end - t;
 
         advance_one_step(grid, dt);
+
         t += dt;
         step++;
 
-        // Output 
-        if (t + 1e-15 >= next_output_t || t >= t_end) {
-            const std::string fname = make_filename(out_dir, step, t);
-            write_grid_csv(grid, fname);
-            std::cout << "Wrote: " << fname << "\n";
-            next_output_t += output_dt;
+        if (ENABLE_OUTPUT) {
+            if (t + 1e-15 >= next_output_t || t >= t_end) {
+                write_grid_csv(grid, make_filename(out_dir, step, t));
+                next_output_t += output_dt;
+            }
         }
     }
+
+    std::cout << "Finished. Steps = " << step << std::endl;
 
     return 0;
 }

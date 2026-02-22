@@ -3,11 +3,27 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 import math
+import argparse
+import os
+
+# =============================
+# command line argument
+# =============================
+parser = argparse.ArgumentParser(
+    description="Plot schlieren evolution (log10(|grad rho|)) from CFD output CSVs"
+)
+parser.add_argument(
+    "mode",
+    choices=["serial", "omp", "mpi"],
+    help="Select which result folder to use (res/<mode>)"
+)
+args = parser.parse_args()
+
+csv_dir = f"res/{args.mode}"
 
 # =============================
 # settings
 # =============================
-csv_dir = "res/serial"
 n_panels = 10
 ncols = 2
 cmap = "gray"
@@ -16,7 +32,8 @@ cmap = "gray"
 # load csv files
 # =============================
 files = sorted(glob.glob(f"{csv_dir}/step_*.csv"))
-assert len(files) >= n_panels, "Not enough CSV files"
+if len(files) < n_panels:
+    raise ValueError(f"Not enough CSV files in {csv_dir}: found {len(files)}, need {n_panels}")
 
 # pick evenly spaced snapshots
 indices = np.linspace(0, len(files) - 1, n_panels, dtype=int)
@@ -84,12 +101,13 @@ cbar = fig.colorbar(im, ax=axes, shrink=0.9)
 cbar.set_label(r"$\log_{10}(|\nabla \rho|)$")
 
 fig.suptitle(
-    "Shock–Bubble Interaction: Schlieren Evolution",
+    f"Shock–Bubble Interaction ({args.mode.upper()}): Schlieren Evolution",
     fontsize=16
 )
 
 # =============================
-# save / show
+# save
 # =============================
-# plt.savefig("schlieren_2x5.pdf", dpi=300)
-plt.savefig(f"{csv_dir}/schlieren.png", dpi=300)
+out_path = os.path.join(csv_dir, f"schlieren_{args.mode}.png")
+plt.savefig(out_path, dpi=300)
+print(f"Saved plot to {out_path}")
