@@ -3,11 +3,24 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 import math
+import argparse
+import os
 
 # -----------------------------
-# settings
+# command line argument
 # -----------------------------
-csv_dir = "res/serial"
+parser = argparse.ArgumentParser(
+    description="Plot density evolution from CFD output"
+)
+parser.add_argument(
+    "mode",
+    choices=["serial", "omp", "mpi"],
+    help="Select which result folder to use"
+)
+
+args = parser.parse_args()
+
+csv_dir = f"res/{args.mode}"
 n_panels = 10
 ncols = 2
 cmap = "viridis"
@@ -16,7 +29,9 @@ cmap = "viridis"
 # load files
 # -----------------------------
 files = sorted(glob.glob(f"{csv_dir}/step_*.csv"))
-assert len(files) >= n_panels, "Not enough CSV files"
+
+if len(files) < n_panels:
+    raise ValueError("Not enough CSV files in folder")
 
 # pick evenly spaced snapshots
 indices = np.linspace(0, len(files)-1, n_panels, dtype=int)
@@ -37,7 +52,7 @@ nrows = math.ceil(n_panels / ncols)
 
 fig, axes = plt.subplots(
     nrows, ncols,
-    figsize=(10, 14),   # tall figure
+    figsize=(10, 14),
     sharex=True,
     sharey=True,
     constrained_layout=True
@@ -72,8 +87,10 @@ cbar = fig.colorbar(im, ax=axes, shrink=0.9)
 cbar.set_label(r"$\rho$")
 
 fig.suptitle(
-    "Shock–Bubble Interaction: Density Evolution",
+    f"Shock–Bubble Interaction ({args.mode.upper()}): Density Evolution",
     fontsize=16
 )
 
-plt.savefig(f"{csv_dir}/density_plot.png")
+output_file = os.path.join(csv_dir, f"density_plot_{args.mode}.png")
+plt.savefig(output_file, dpi=300)
+print(f"Saved plot to {output_file}")

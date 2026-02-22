@@ -14,3 +14,4 @@
 
 void write_grid_csv(const Grid& grid, const std::string& filename);
 std::string make_filename(const std::string& dir, int step, double t);
+double check_symmetry(const Grid& grid, double t, bool verbose);

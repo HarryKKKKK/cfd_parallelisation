@@ -16,7 +16,7 @@
 //   OUTPUT CONTROL SWITCH
 // =============================
 
-constexpr bool ENABLE_OUTPUT = false;
+constexpr bool ENABLE_OUTPUT = true;
 
 int main() {
 
