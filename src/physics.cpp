@@ -128,6 +128,29 @@ double max_wave_speed_y(const Conserved& U) {
 
 
 Conserved hll_flux_x(const Conserved& UL, const Conserved& UR) {
+    // // HLL flux
+    // const auto L = decode_state(UL);
+    // const auto R = decode_state(UR);
+
+    // const double SL = std::min(L.u - L.a, R.u - R.a);
+    // const double SR = std::max(L.u + L.a, R.u + R.a);
+
+    // const Conserved FL = flux_x_decoded(UL, L.u, L.p);
+    // const Conserved FR = flux_x_decoded(UR, R.u, R.p);
+
+    // if (SL >= 0.0) return FL;
+    // if (SR <= 0.0) return FR;
+
+    // const double inv = 1.0 / (SR - SL);
+
+    // Conserved FH;
+    // FH.rho  = (SR*FL.rho  - SL*FR.rho  + SL*SR*(UR.rho  - UL.rho )) * inv;
+    // FH.rhou = (SR*FL.rhou - SL*FR.rhou + SL*SR*(UR.rhou - UL.rhou)) * inv;
+    // FH.rhov = (SR*FL.rhov - SL*FR.rhov + SL*SR*(UR.rhov - UL.rhov)) * inv;
+    // FH.E    = (SR*FL.E    - SL*FR.E    + SL*SR*(UR.E    - UL.E   )) * inv;
+    // return FH;
+
+    // HLLC flux
     const auto L = decode_state(UL);
     const auto R = decode_state(UR);
 
@@ -140,17 +163,76 @@ Conserved hll_flux_x(const Conserved& UL, const Conserved& UR) {
     if (SL >= 0.0) return FL;
     if (SR <= 0.0) return FR;
 
-    const double inv = 1.0 / (SR - SL);
+    const double denom =
+        L.rho * (SL - L.u) - R.rho * (SR - R.u);
 
-    Conserved FH;
-    FH.rho  = (SR*FL.rho  - SL*FR.rho  + SL*SR*(UR.rho  - UL.rho )) * inv;
-    FH.rhou = (SR*FL.rhou - SL*FR.rhou + SL*SR*(UR.rhou - UL.rhou)) * inv;
-    FH.rhov = (SR*FL.rhov - SL*FR.rhov + SL*SR*(UR.rhov - UL.rhov)) * inv;
-    FH.E    = (SR*FL.E    - SL*FR.E    + SL*SR*(UR.E    - UL.E   )) * inv;
-    return FH;
+    const double eps = 1e-14;
+    const double inv_denom =
+        1.0 / (std::abs(denom) < eps ? (denom >= 0 ? eps : -eps) : denom);
+
+    const double Sstar =
+        (R.p - L.p
+         + L.rho * L.u * (SL - L.u)
+         - R.rho * R.u * (SR - R.u)) * inv_denom;
+
+    // Left star state
+    const double rhoL_star =
+        L.rho * (SL - L.u) / (SL - Sstar);
+
+    Conserved UL_star;
+    UL_star.rho  = rhoL_star;
+    UL_star.rhou = rhoL_star * Sstar;
+    UL_star.rhov = rhoL_star * L.v;
+    UL_star.E =
+        rhoL_star *
+        ( UL.E / L.rho
+          + (Sstar - L.u) *
+            (Sstar + L.p / (L.rho * (SL - L.u))) );
+
+    // Right star state
+    const double rhoR_star =
+        R.rho * (SR - R.u) / (SR - Sstar);
+
+    Conserved UR_star;
+    UR_star.rho  = rhoR_star;
+    UR_star.rhou = rhoR_star * Sstar;
+    UR_star.rhov = rhoR_star * R.v;
+    UR_star.E =
+        rhoR_star *
+        ( UR.E / R.rho
+          + (Sstar - R.u) *
+            (Sstar + R.p / (R.rho * (SR - R.u))) );
+
+    if (Sstar >= 0.0)
+        return FL + (UL_star - UL) * SL;
+    else
+        return FR + (UR_star - UR) * SR;
 }
 
 Conserved hll_flux_y(const Conserved& UL, const Conserved& UR) {
+    // // HLL flux
+    // const auto L = decode_state(UL);
+    // const auto R = decode_state(UR);
+
+    // const double SL = std::min(L.v - L.a, R.v - R.a);
+    // const double SR = std::max(L.v + L.a, R.v + R.a);
+
+    // const Conserved GL = flux_y_decoded(UL, L.v, L.p);
+    // const Conserved GR = flux_y_decoded(UR, R.v, R.p);
+
+    // if (SL >= 0.0) return GL;
+    // if (SR <= 0.0) return GR;
+
+    // const double inv = 1.0 / (SR - SL);
+
+    // Conserved GH;
+    // GH.rho  = (SR*GL.rho  - SL*GR.rho  + SL*SR*(UR.rho  - UL.rho )) * inv;
+    // GH.rhou = (SR*GL.rhou - SL*GR.rhou + SL*SR*(UR.rhou - UL.rhou)) * inv;
+    // GH.rhov = (SR*GL.rhov - SL*GR.rhov + SL*SR*(UR.rhov - UL.rhov)) * inv;
+    // GH.E    = (SR*GL.E    - SL*GR.E    + SL*SR*(UR.E    - UL.E   )) * inv;
+    // return GH;
+
+    // HLLC flux
     const auto L = decode_state(UL);
     const auto R = decode_state(UR);
 
@@ -163,14 +245,48 @@ Conserved hll_flux_y(const Conserved& UL, const Conserved& UR) {
     if (SL >= 0.0) return GL;
     if (SR <= 0.0) return GR;
 
-    const double inv = 1.0 / (SR - SL);
+    const double denom =
+        L.rho * (SL - L.v) - R.rho * (SR - R.v);
 
-    Conserved GH;
-    GH.rho  = (SR*GL.rho  - SL*GR.rho  + SL*SR*(UR.rho  - UL.rho )) * inv;
-    GH.rhou = (SR*GL.rhou - SL*GR.rhou + SL*SR*(UR.rhou - UL.rhou)) * inv;
-    GH.rhov = (SR*GL.rhov - SL*GR.rhov + SL*SR*(UR.rhov - UL.rhov)) * inv;
-    GH.E    = (SR*GL.E    - SL*GR.E    + SL*SR*(UR.E    - UL.E   )) * inv;
-    return GH;
+    const double eps = 1e-14;
+    const double inv_denom =
+        1.0 / (std::abs(denom) < eps ? (denom >= 0 ? eps : -eps) : denom);
+
+    const double Sstar =
+        (R.p - L.p
+         + L.rho * L.v * (SL - L.v)
+         - R.rho * R.v * (SR - R.v)) * inv_denom;
+
+    const double rhoL_star =
+        L.rho * (SL - L.v) / (SL - Sstar);
+
+    Conserved UL_star;
+    UL_star.rho  = rhoL_star;
+    UL_star.rhou = rhoL_star * L.u;
+    UL_star.rhov = rhoL_star * Sstar;
+    UL_star.E =
+        rhoL_star *
+        ( UL.E / L.rho
+          + (Sstar - L.v) *
+            (Sstar + L.p / (L.rho * (SL - L.v))) );
+
+    const double rhoR_star =
+        R.rho * (SR - R.v) / (SR - Sstar);
+
+    Conserved UR_star;
+    UR_star.rho  = rhoR_star;
+    UR_star.rhou = rhoR_star * R.u;
+    UR_star.rhov = rhoR_star * Sstar;
+    UR_star.E =
+        rhoR_star *
+        ( UR.E / R.rho
+          + (Sstar - R.v) *
+            (Sstar + R.p / (R.rho * (SR - R.v))) );
+
+    if (Sstar >= 0.0)
+        return GL + (UL_star - UL) * SL;
+    else
+        return GR + (UR_star - UR) * SR;
 }
 
 double sound_speed(const Primitive& W)

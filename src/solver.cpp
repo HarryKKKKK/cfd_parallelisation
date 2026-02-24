@@ -12,21 +12,26 @@
 #endif
 
 // ------------------------------
-// Small helpers
+// minmod limiter
 // ------------------------------
-static inline Conserved add(const Conserved& a, const Conserved& b) {
-  return {a.rho + b.rho, a.rhou + b.rhou, a.rhov + b.rhov, a.E + b.E};
-}
-static inline Conserved sub(const Conserved& a, const Conserved& b) {
-  return {a.rho - b.rho, a.rhou - b.rhou, a.rhov - b.rhov, a.E - b.E};
-}
-static inline Conserved mul(const Conserved& a, double s) {
-  return {a.rho * s, a.rhou * s, a.rhov * s, a.E * s};
-}
+// double minmod(double a, double b) {
+//   if (a * b <= 0.0) return 0.0;
+//   return (std::abs(a) < std::abs(b)) ? a : b;
+// }
 
-double minmod(double a, double b) {
+static inline double minmod2(double a, double b) {
   if (a * b <= 0.0) return 0.0;
   return (std::abs(a) < std::abs(b)) ? a : b;
+}
+
+// MC limiter slope for scalar
+double minmod(double dL, double dR) {
+  // dL = Uc - Ul, dR = Ur - Uc
+  // MC: minmod( (dL+dR)/2, 2*dL, 2*dR )
+  const double a = 0.5 * (dL + dR);
+  const double b = 2.0 * dL;
+  const double c = 2.0 * dR;
+  return minmod2(a, minmod2(b, c));
 }
 
 static inline Conserved minmod_vec(const Conserved& a, const Conserved& b) {
@@ -40,8 +45,6 @@ static inline Conserved minmod_vec(const Conserved& a, const Conserved& b) {
 
 // ------------------------------
 // Transmissive (zero-gradient) ghost fill
-// For ng >= 1. We will REQUIRE ng >= 2 in advance_one_step()
-// because we compute predictor on (physical + 1 ghost layer) and need (I±1,J±1).
 // ------------------------------
 void apply_boundary_conditions(Grid& g) {
   const int ng = g.ng;
@@ -57,7 +60,7 @@ void apply_boundary_conditions(Grid& g) {
   const int jB = ng;
   const int jT = ng + ny - 1;
 
-  // Left / Right ghost columns: copy nearest interior column
+  // Left/right ghost columns
   for (int J = 0; J < ny_tot; ++J) {
     for (int gc = 0; gc < ng; ++gc) {
       g.U[g.idx(gc, J)]              = g.U[g.idx(iL, J)];
@@ -65,7 +68,7 @@ void apply_boundary_conditions(Grid& g) {
     }
   }
 
-  // Bottom / Top ghost rows: copy nearest interior row
+  // Bottom/top ghost rows
   for (int I = 0; I < nx_tot; ++I) {
     for (int gr = 0; gr < ng; ++gr) {
       g.U[g.idx(I, gr)]              = g.U[g.idx(I, jB)];
@@ -75,7 +78,6 @@ void apply_boundary_conditions(Grid& g) {
 }
 
 // ------------------------------
-// CFL timestep (scan ONLY physical cells)
 // dt = cfl*min(dx,dy)/max(|v|+cs)
 // ------------------------------
 double compute_dt(const Grid& grid, double cfl) {
@@ -89,28 +91,20 @@ double compute_dt(const Grid& grid, double cfl) {
 #ifdef _OPENMP
 #pragma omp parallel for collapse(2) reduction(max:amax) schedule(static)
 #endif
-  for (int j = 0; j < ny; ++j) {
-    for (int i = 0; i < nx; ++i) {
-      const int I = i + ng;
-      const int J = j + ng;
+  for (int j = ng; j < ny + ng; ++j) {
+    for (int i = ng; i < nx + ng; ++i) {
+      const Conserved& U = grid.U[ grid.idx(i, j) ];
+      const Primitive  W = conserved_to_primitive(U);
 
-      const Conserved& U = grid.U[ grid.idx(I, J) ];
-      const Primitive W  = conserved_to_primitive(U);
-      const double vmag  = std::sqrt(W.u*W.u + W.v*W.v);
-      const double cs    = sound_speed(W);
+      const double vmag = std::sqrt(W.u * W.u + W.v * W.v);
+      const double cs   = sound_speed(W);
+
       amax = std::max(amax, vmag + cs);
     }
   }
 
   if (amax <= 0.0) return 1e-12;
   return cfl * h / amax;
-}
-
-// ------------------------------
-// Optional RHS not used here
-// ------------------------------
-void compute_rhs(const Grid& grid, std::vector<Conserved>& rhs) {
-  rhs.assign(grid.U.size(), Conserved{0,0,0,0});
 }
 
 // ------------------------------
@@ -141,8 +135,8 @@ struct Workspace {
     Umx.resize(nU); Upx.resize(nU); Umy.resize(nU); Upy.resize(nU);
     Uhat_mx.resize(nU); Uhat_px.resize(nU); Uhat_my.resize(nU); Uhat_py.resize(nU);
 
-    Fx.resize((nx + 1) * ny);
-    Gy.resize(nx * (ny + 1));
+    Fx.resize(static_cast<std::size_t>(nx + 1) * static_cast<std::size_t>(ny));
+    Gy.resize(static_cast<std::size_t>(nx)     * static_cast<std::size_t>(ny + 1));
   }
 };
 
@@ -174,13 +168,11 @@ void advance_one_step(Grid& grid, double dt) {
   const double cx = dt / (2.0 * grid.dx);
   const double cy = dt / (2.0 * grid.dy);
 
-  // We compute predictor states on: I = ng-1 .. ng+nx, J = ng-1 .. ng+ny
-  // This covers one ghost layer around the physical domain so interface fluxes
-  // at iface=0 or iface=nx (and iface=0/ny in y) can read ws.Uhat_* safely.
+  // predictor states on: I = ng-1 .. ng+nx, J = ng-1 .. ng+ny (inclusive)
   const int Imin = ng - 1;
-  const int Imax = ng + nx;     // inclusive
+  const int Imax = ng + nx;
   const int Jmin = ng - 1;
-  const int Jmax = ng + ny;     // inclusive
+  const int Jmax = ng + ny;
 
 #ifdef _OPENMP
 #pragma omp parallel
@@ -188,7 +180,6 @@ void advance_one_step(Grid& grid, double dt) {
   {
     // ------------------------------------------------------------
     // (I) Reconstruction + (II) Hancock predictor
-    // on (physical + 1 ghost layer)
     // ------------------------------------------------------------
 #ifdef _OPENMP
 #pragma omp for collapse(2) schedule(static)
@@ -196,6 +187,7 @@ void advance_one_step(Grid& grid, double dt) {
     for (int J = Jmin; J <= Jmax; ++J) {
       for (int I = Imin; I <= Imax; ++I) {
         const auto id = grid.idx(I, J);
+
         const Conserved& Uc = grid.U[id];
 
         const Conserved& Ul = grid.U[ grid.idx(I - 1, J) ];
@@ -203,31 +195,32 @@ void advance_one_step(Grid& grid, double dt) {
         const Conserved& Ub = grid.U[ grid.idx(I, J - 1) ];
         const Conserved& Ut = grid.U[ grid.idx(I, J + 1) ];
 
-        const Conserved sx = minmod_vec(sub(Uc, Ul), sub(Ur, Uc));
-        const Conserved sy = minmod_vec(sub(Uc, Ub), sub(Ut, Uc));
+        const Conserved sx = minmod_vec(Uc - Ul, Ur - Uc);
+        const Conserved sy = minmod_vec(Uc - Ub, Ut - Uc);
 
-        const Conserved Umx = sub(Uc, mul(sx, 0.5));
-        const Conserved Upx = add(Uc, mul(sx, 0.5));
-        const Conserved Umy = sub(Uc, mul(sy, 0.5));
-        const Conserved Upy = add(Uc, mul(sy, 0.5));
+        const Conserved Umx = Uc - (sx * 0.5);
+        const Conserved Upx = Uc + (sx * 0.5);
+        const Conserved Umy = Uc - (sy * 0.5);
+        const Conserved Upy = Uc + (sy * 0.5);
 
         ws.Umx[id] = Umx; ws.Upx[id] = Upx;
         ws.Umy[id] = Umy; ws.Upy[id] = Upy;
 
-        const Conserved dF   = sub(flux_x(Umx), flux_x(Upx));
-        const Conserved dG   = sub(flux_y(Umy), flux_y(Upy));
-        const Conserved corr = add(mul(dF, cx), mul(dG, cy));
+        const Conserved dF = flux_x(Umx) - flux_x(Upx);
+        const Conserved dG = flux_y(Umy) - flux_y(Upy);
 
-        ws.Uhat_mx[id] = add(Umx, corr);
-        ws.Uhat_px[id] = add(Upx, corr);
-        ws.Uhat_my[id] = add(Umy, corr);
-        ws.Uhat_py[id] = add(Upy, corr);
+        // corr = cx*dF + cy*dG
+        const Conserved corr = (dF * cx) + (dG * cy);
+
+        ws.Uhat_mx[id] = Umx + corr;
+        ws.Uhat_px[id] = Upx + corr;
+        ws.Uhat_my[id] = Umy + corr;
+        ws.Uhat_py[id] = Upy + corr;
       }
     }
 
     // ------------------------------------------------------------
     // (IIIa) x-interfaces HLL fluxes: iface = 0..nx, j = 0..ny-1
-    // Use ghost cells so NO special casing needed.
     // Interface between left cell (I=ng+iface-1) and right cell (I=ng+iface)
     // ------------------------------------------------------------
 #ifdef _OPENMP
@@ -242,8 +235,8 @@ void advance_one_step(Grid& grid, double dt) {
         const auto idL = grid.idx(IL, J);
         const auto idR = grid.idx(IR, J);
 
-        const Conserved& UL = ws.Uhat_px[idL]; // +x face of left cell
-        const Conserved& UR = ws.Uhat_mx[idR]; // -x face of right cell
+        const Conserved& UL = ws.Uhat_px[idL];
+        const Conserved& UR = ws.Uhat_mx[idR];
 
         ws.Fx[ fx_id(nx, iface, j) ] = hll_flux_x(UL, UR);
       }
@@ -290,16 +283,15 @@ void advance_one_step(Grid& grid, double dt) {
         const Conserved& G_jm = ws.Gy[ gy_id(nx, i, j) ];
         const Conserved& G_jp = ws.Gy[ gy_id(nx, i, j+1) ];
 
-        const Conserved update =
-          add(mul(sub(F_ip, F_im), dtdx),
-              mul(sub(G_jp, G_jm), dtdy));
+        // update = (dt/dx)*(F_ip - F_im) + (dt/dy)*(G_jp - G_jm)
+        const Conserved update = ((F_ip - F_im) * dtdx) + ((G_jp - G_jm) * dtdy);
 
         const int I = i + ng;
         const int J = j + ng;
         const auto id = grid.idx(I, J);
 
-        grid.U[id] = sub(grid.U[id], update);
+        grid.U[id] = grid.U[id] - update;
       }
     }
-  } // end parallel region
+  } // omp parallel
 }

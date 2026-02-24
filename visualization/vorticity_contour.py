@@ -1,109 +1,159 @@
+import os
+import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import glob
-import argparse
-import os
 
-def parse_time_from_filename(fname: str) -> float:
-    t_str = fname.split("_t_")[-1].replace(".csv", "")
+# ================= 固定配置 =================
+TARGETS = [0.6, 1.2, 1.8, 3.0, 4.6, 6.2, 7.8, 9.4, 12.6, 17.4, 19.0]
+
+NX, NY = 500, 197
+X_LEN, Y_LEN = 0.225, 0.089
+
+# 物理时间终点（和你 main 一致）
+T_END_PHYS = 0.0011741
+T_END_DIM  = 19.0
+
+PATTERN  = "step_*_t_*.csv"
+OUT_NAME = "vorticity.png"
+
+# ---- 虚线小球（初始 bubble） ----
+# setting: Bubble radius 0.025m, centre (0.035m, 0.0445m)
+R_BUBBLE  = 0.025
+BUBBLE_CX = 0.035
+BUBBLE_CY = 0.0445
+DRAW_BUBBLE = True
+BUBBLE_LINEWIDTH = 0.8
+
+# ---- Vorticity contour config ----
+N_LEVELS_EACH_SIDE = 8
+ROBUST_PCTL = 99.5
+LINEWIDTH = 0.6
+# ===============================
+
+def parse_time(fname: str) -> float:
+    base = os.path.basename(fname)
+    t_str = base.split("_t_")[-1].replace(".csv", "")
     return float(t_str)
 
-def load_frame(fname):
-    return pd.read_csv(fname)
+def pick_column(df: pd.DataFrame, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
-def find_nearest_files(files, t_dim_all, targets):
-    chosen = []
-    chosen_t = []
-    for tt in targets:
-        k = int(np.argmin(np.abs(t_dim_all - tt)))
-        chosen.append(files[k])
-        chosen_t.append(t_dim_all[k])
-    return chosen, chosen_t
+def load_uv(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    u_col = pick_column(df, ["u", "U", "velx", "vx"])
+    v_col = pick_column(df, ["v", "V", "vely", "vy"])
 
-def compute_uv(df):
-    cols = set(df.columns)
-    if "u" in cols and "v" in cols:
-        return df["u"].values, df["v"].values
-    # fallback to conserved
-    if "rho" in cols and "rhou" in cols and "rhov" in cols:
-        rho = df["rho"].values
-        u = df["rhou"].values / rho
-        v = df["rhov"].values / rho
+    if u_col is not None and v_col is not None:
+        u = df[u_col].to_numpy(dtype=float).reshape((NY, NX))
+        v = df[v_col].to_numpy(dtype=float).reshape((NY, NX))
         return u, v
-    raise ValueError("CSV must contain either (u,v) or (rho,rhou,rhov).")
 
-# -----------------------------
-# CLI
-# -----------------------------
-parser = argparse.ArgumentParser(description="Fig9-style vorticity contour panels from CSV outputs")
-parser.add_argument("mode", choices=["serial", "omp", "mpi"], help="res/<mode>")
-parser.add_argument("--targets", type=float, nargs="*", default=[0.6, 1.2, 1.8, 3.0, 4.6, 6.2, 7.8, 12.6, 19.0],
-                    help="Dimensionless target times t* (default: paper-like list)")
-parser.add_argument("--T_end_phys", type=float, default=0.0011741, help="Physical end time in seconds")
-parser.add_argument("--T_end_dim",  type=float, default=19.0, help="Dimensionless end time (default 19)")
-# vorticity contour control
-parser.add_argument("--omega_max", type=float, default=3000.0,
-                    help="Max |omega| for contour levels (default 3000). Tune to match paper look.")
-parser.add_argument("--n_levels", type=int, default=41, help="Number of vorticity contour levels (odd recommended)")
-parser.add_argument("--linewidth", type=float, default=0.5)
-args = parser.parse_args()
+    rho_col  = pick_column(df, ["rho", "density"])
+    rhou_col = pick_column(df, ["rhou", "rho_u", "mx", "momx"])
+    rhov_col = pick_column(df, ["rhov", "rho_v", "my", "momy"])
+    if rho_col is None or rhou_col is None or rhov_col is None:
+        raise KeyError(
+            "Need columns either (u,v) or (rho,rhou,rhov).\n"
+            f"Found: {list(df.columns)}"
+        )
 
-csv_dir = f"res/{args.mode}"
-files = sorted(glob.glob(f"{csv_dir}/step_*.csv"))
-if len(files) == 0:
-    raise ValueError(f"No files: {csv_dir}/step_*.csv")
+    rho  = df[rho_col].to_numpy(dtype=float).reshape((NY, NX))
+    rhou = df[rhou_col].to_numpy(dtype=float).reshape((NY, NX))
+    rhov = df[rhov_col].to_numpy(dtype=float).reshape((NY, NX))
 
-t_phys = np.array([parse_time_from_filename(f) for f in files], dtype=float)
-t_ref  = args.T_end_phys / args.T_end_dim
-t_dim  = t_phys / t_ref
+    rho_safe = np.maximum(rho, 1e-14)
+    u = rhou / rho_safe
+    v = rhov / rho_safe
+    return u, v
 
-targets = np.array(args.targets, dtype=float)
-chosen_files, chosen_t_dim = find_nearest_files(files, t_dim, targets)
+def compute_vorticity(u: np.ndarray, v: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    dv_dy, dv_dx = np.gradient(v, dy, dx, edge_order=1)
+    du_dy, du_dx = np.gradient(u, dy, dx, edge_order=1)
+    return dv_dx - du_dy
 
-# grid info
-df0 = load_frame(chosen_files[0])
-xs = np.unique(df0["x"].values)
-ys = np.unique(df0["y"].values)
-nx, ny = len(xs), len(ys)
-extent = [xs.min(), xs.max(), ys.min(), ys.max()]
-dx = xs[1] - xs[0]
-dy = ys[1] - ys[0]
+def main(indir: str = "res/serial"):
+    out_path = os.path.join(indir, OUT_NAME)
 
-# symmetric levels around 0
-omega_max = float(args.omega_max)
-levels = np.linspace(-omega_max, omega_max, args.n_levels)
+    files = sorted(glob.glob(os.path.join(indir, PATTERN)))
+    if not files:
+        raise SystemExit(f"No files found: {os.path.join(indir, PATTERN)}")
 
-# -----------------------------
-# plotting
-# -----------------------------
-N = len(chosen_files)
-fig, axes = plt.subplots(N, 1, figsize=(6, 2.0 * N))
-if N == 1:
-    axes = [axes]
+    # 映射：t_dim = t_phys / t_ref
+    t_ref = T_END_PHYS / T_END_DIM
+    t_phys_all = np.array([parse_time(f) for f in files], dtype=float)
+    t_dim_all  = t_phys_all / t_ref
 
-for ax, fname, tstar in zip(axes, chosen_files, chosen_t_dim):
-    df = load_frame(fname)
-    u_flat, v_flat = compute_uv(df)
+    # meshgrid（保持和你的 density 脚本一致）
+    xs = np.linspace(0, X_LEN, NX)
+    ys = np.linspace(0, Y_LEN, NY)
+    X, Y = np.meshgrid(xs, ys)
+    dx = xs[1] - xs[0]
+    dy = ys[1] - ys[0]
 
-    u = u_flat.reshape(ny, nx)
-    v = v_flat.reshape(ny, nx)
+    def load_w_by_dim_t(t_dim_target: float):
+        idx = int(np.argmin(np.abs(t_dim_all - t_dim_target)))
+        df = pd.read_csv(files[idx])
+        u, v = load_uv(df)
+        w = compute_vorticity(u, v, dx, dy)
+        return w, files[idx], t_phys_all[idx], t_dim_all[idx]
 
-    # vorticity omega = dv/dx - du/dy
-    dv_dx = np.gradient(v, dx, axis=1)
-    du_dy = np.gradient(u, dy, axis=0)
-    omega = dv_dx - du_dy
+    if DRAW_BUBBLE:
+        theta = np.linspace(0, 2*np.pi, 400)
+        xb = BUBBLE_CX + R_BUBBLE * np.cos(theta)
+        yb = BUBBLE_CY + R_BUBBLE * np.sin(theta)
 
-    ax.contour(omega, levels=levels, colors="k", linewidths=args.linewidth, extent=extent)
-    ax.set_aspect("equal")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title(f"t={tstar:.1f}", fontsize=12, pad=2)
-    for spine in ax.spines.values():
-        spine.set_linewidth(0.8)
+    # 先算所有帧，用于统一 levels
+    Ws, metas = [], []
+    for t_dim_target in TARGETS:
+        w, f, tphys, tdim = load_w_by_dim_t(t_dim_target)
+        Ws.append(w)
+        metas.append((t_dim_target, f, tphys, tdim))
 
-plt.tight_layout(h_pad=0.2)
+    w_all = np.concatenate([w.ravel() for w in Ws])
+    wmax = np.percentile(np.abs(w_all), ROBUST_PCTL)
+    if not np.isfinite(wmax) or wmax <= 0:
+        wmax = np.max(np.abs(w_all)) + 1e-12
 
-out_path = os.path.join(csv_dir, f"fig9_vorticity_contours_{args.mode}.png")
-plt.savefig(out_path, dpi=300, bbox_inches="tight")
-print(f"Saved: {out_path}")
+    levels_pos = np.linspace(wmax / N_LEVELS_EACH_SIDE, wmax, N_LEVELS_EACH_SIDE)
+    levels_neg = -levels_pos[::-1]
+
+    fig, axes = plt.subplots(len(TARGETS), 1, figsize=(6, 18))
+    if len(TARGETS) == 1:
+        axes = [axes]
+
+    for i, (w, meta) in enumerate(zip(Ws, metas)):
+        t_dim_target, chosen_file, chosen_t_phys, chosen_t_dim = meta
+        ax = axes[i]
+
+        ax.contour(X, Y, w, levels=levels_pos, colors="k",
+                   linewidths=LINEWIDTH, linestyles="solid")
+        ax.contour(X, Y, w, levels=levels_neg, colors="k",
+                   linewidths=LINEWIDTH, linestyles="dashed")
+
+        if DRAW_BUBBLE:
+            ax.plot(xb, yb, "k--", linewidth=BUBBLE_LINEWIDTH)
+
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"t={t_dim_target:g}", fontsize=12, pad=2)
+
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1.0)
+            spine.set_color("black")
+
+        print(f"[{i}] target t_dim={t_dim_target:g} -> chosen t_dim={chosen_t_dim:g}, "
+              f"t_phys={chosen_t_phys:.6g}, file={os.path.basename(chosen_file)}")
+
+    plt.tight_layout(h_pad=0.2)
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    print(f"图片已生成：{out_path}")
+
+if __name__ == "__main__":
+    import sys
+    indir = sys.argv[1] if len(sys.argv) > 1 else "res/serial"
+    main(indir)
