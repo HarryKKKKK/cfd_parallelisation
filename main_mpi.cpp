@@ -1,211 +1,262 @@
 #include "types.hpp"
+#include "physics.hpp"
+#include "mpi_solver.hpp"
 #include "init.hpp"
 #include "utils.hpp"
-#include "mpi_solver.hpp"
 
 #include <mpi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
 
-// Pack local interior (no ghosts) into a contiguous buffer [ny_local][nx_global]
+constexpr bool ENABLE_OUTPUT = true;
+
+// Local interior pack: [ny_local][nx_global] contiguous
 static std::vector<Conserved> pack_local_interior(const Grid& grid) {
   const int ng = grid.ng;
-  const int nx = grid.nx; // interior nx (should equal nx_global)
-  const int ny = grid.ny; // local interior ny
+  const int nx = grid.nx;
+  const int ny = grid.ny;
 
-  std::vector<Conserved> buf(static_cast<size_t>(nx) * static_cast<size_t>(ny));
+  std::vector<Conserved> buf(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny));
 
   for (int j = 0; j < ny; ++j) {
-    // local interior row j corresponds to grid index J = ng + j
     const int J = ng + j;
-    const Conserved* row_ptr = &grid.U[grid.idx(ng, J)];
-    std::copy(row_ptr, row_ptr + nx, &buf[static_cast<size_t>(j) * nx]);
+    const Conserved* src = &grid.U[ grid.idx(ng, J) ];
+    std::copy(src, src + nx, &buf[static_cast<std::size_t>(j) * nx]);
   }
   return buf;
 }
 
-// Build a global Grid on rank0 and write a single CSV using your existing writer
-static void write_global_csv_rank0(const std::vector<Conserved>& global_interior,
-                                  int nx_global, int ny_global,
-                                  int ng,
-                                  double Lx, double Ly,
-                                  double dx, double dy,
-                                  const std::string& filename) {
-  Grid g;
-  g.init(nx_global, ny_global, ng, Lx, Ly); // will set dx/dy internally, we override next
-  g.dx = dx;
-  g.dy = dy;
-  g.x0 = 0.0;
-  g.y0 = 0.0;
-
-  // Fill interior (no ghosts) into g.U
-  for (int j = 0; j < ny_global; ++j) {
-    const int J = ng + j;
-    for (int i = 0; i < nx_global; ++i) {
-      const int I = ng + i;
-      g.U[g.idx(I, J)] = global_interior[static_cast<size_t>(j) * nx_global + i];
-    }
+// MPI datatype for Conserved (same approach as mpi_solver.cpp, but local to main)
+static MPI_Datatype mpi_conserved_type_main() {
+  static MPI_Datatype T = MPI_DATATYPE_NULL;
+  static bool inited = false;
+  if (!inited) {
+    Conserved dummy{};
+    int blocklen[4] = {1,1,1,1};
+    MPI_Aint disp[4], base;
+    MPI_Get_address(&dummy, &base);
+    MPI_Get_address(&dummy.rho,  &disp[0]);
+    MPI_Get_address(&dummy.rhou, &disp[1]);
+    MPI_Get_address(&dummy.rhov, &disp[2]);
+    MPI_Get_address(&dummy.E,    &disp[3]);
+    for (int k=0;k<4;++k) disp[k] -= base;
+    MPI_Datatype types[4] = {MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE};
+    MPI_Type_create_struct(4, blocklen, disp, types, &T);
+    MPI_Type_commit(&T);
+    inited = true;
   }
+  return T;
+}
 
-  // Apply transmissive BC on all four sides for completeness
-  // (If your writer only writes interior, this is not strictly necessary.)
-  // You can reuse your serial BC if it is in solver.cpp, but we keep it simple:
-  // left/right
-  const int nx_tot = nx_global + 2 * ng;
-  const int ny_tot = ny_global + 2 * ng;
-  for (int J = 0; J < ny_tot; ++J) {
-    for (int gcol = 0; gcol < ng; ++gcol) {
-      g.U[g.idx(gcol, J)]              = g.U[g.idx(ng, J)];
-      g.U[g.idx(nx_tot - 1 - gcol, J)] = g.U[g.idx(nx_tot - 1 - ng, J)];
-    }
-  }
-  // bottom/top
-  for (int I = 0; I < nx_tot; ++I) {
-    for (int grow = 0; grow < ng; ++grow) {
-      g.U[g.idx(I, grow)]              = g.U[g.idx(I, ng)];
-      g.U[g.idx(I, ny_tot - 1 - grow)] = g.U[g.idx(I, ny_tot - 1 - ng)];
-    }
-  }
+// On rank0: unpack global interior into full Grid interior
+static void unpack_global_interior(Grid& g_full, const std::vector<Conserved>& all) {
+  const int ng = g_full.ng;
+  const int nx = g_full.nx;
+  const int ny = g_full.ny;
 
-  write_grid_csv(g, filename);
+  for (int j = 0; j < ny; ++j) {
+    const Conserved* src = &all[static_cast<std::size_t>(j) * nx];
+    Conserved* dst = &g_full.U[g_full.idx(ng, ng + j)];
+    std::copy(src, src + nx, dst);
+  }
 }
 
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
 
-  // ----------------- Global problem settings (match your serial main) -----------------
-  const int nx_global = 500;
-  const int ny_global = 197;
-  const int ng        = 2;
+  int rank = 0, size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-  const double Lx = 0.225;
-  const double Ly = 0.089;
-
-  const double t_end = 0.0011741;
-  const double cfl   = 0.5;
-
-  const int n_outputs = 10;
-  const std::string out_dir = "res/mpi";
-
-  // ----------------- MPI decomposition -----------------
-  MpiDecomp mp = make_y_slab_decomp(nx_global, ny_global, ng, MPI_COMM_WORLD);
-
-  if (mp.rank == 0) {
+  const std::string out_dir = "res/mpi/hllc";
+  if (ENABLE_OUTPUT && rank == 0) {
     std::filesystem::create_directories(out_dir);
-    std::cout << "MPI size = " << mp.size << "\n";
-    std::cout << "Writing output to: " << out_dir << "\n";
   }
 
-  // Global spacing (IMPORTANT: use global dx/dy on all ranks)
-  const double dx = Lx / nx_global;
-  const double dy = Ly / ny_global;
+  // ----------------- Global settings (same as serial) -----------------
+  const int NX_GLOBAL = 500;
+  const int NY_GLOBAL = 197;
+  const int NG        = 2;
+  const double X_LEN  = 0.225;
+  const double Y_LEN  = 0.089;
 
-  // Local y0 in physical coordinates (so init uses correct y)
-  const double y0_local = mp.y0_global * dy;
+  // ----------------- Init MPI domain + local grid -----------------
+  MpiDomain mp = make_mpi_domain_y_slab(NX_GLOBAL, NY_GLOBAL, NG, MPI_COMM_WORLD);
 
-  // ----------------- Init local grid -----------------
-  Grid grid;
-  // NOTE: grid.init computes dx/dy from Lx/Ly and local ny; we override to global next.
-  grid.init(nx_global, mp.ny_local, ng, Lx, Ly, 0.0, y0_local);
-  grid.dx = dx;
-  grid.dy = dy;
+  Grid grid; // local grid on each rank
+  grid.init(NX_GLOBAL, mp.ny_local, NG, X_LEN, Y_LEN);
 
-  // Initialise shock-bubble on local subdomain using physical coords
-  initialize_shock_bubble(grid);
+  // ----------------- To be EXACTLY serial-identical at t=0: rank0 init full grid then scatter interior -----------------
+  MPI_Datatype T = mpi_conserved_type_main();
 
-  // Ensure ghosts are valid before first output/step
-  exchange_halo_y(grid, mp);
-  apply_physical_bc_mpi(grid, mp);
-
-  // ----------------- Output schedule -----------------
-  int step = 0;
-  double t = 0.0;
-  const int output_every = std::max(1, static_cast<int>(std::ceil((t_end / (n_outputs)) / 1e-12))); // placeholder; we'll do time-based below
-
-  // We'll output when crossing evenly spaced times
-  std::vector<double> out_times;
-  out_times.reserve(n_outputs + 1);
-  for (int k = 0; k <= n_outputs; ++k) {
-    out_times.push_back(t_end * (static_cast<double>(k) / n_outputs));
+  // compute sendcounts/displs (Conserved units) on rank0
+  std::vector<int> sendcounts, displs;
+  if (rank == 0) {
+    sendcounts.resize(size);
+    displs.resize(size);
+    for (int r = 0; r < size; ++r) {
+      const int base = NY_GLOBAL / size;
+      const int rem  = NY_GLOBAL % size;
+      const int ny_r = base + (r < rem ? 1 : 0);
+      const int y0_r = r * base + std::min(r, rem);
+      sendcounts[r] = ny_r * NX_GLOBAL;
+      displs[r]     = y0_r * NX_GLOBAL;
+    }
   }
-  int next_out_idx = 0;
 
-  auto do_output = [&](int step_id, double time_now) {
-    // Pack local interior
-    std::vector<Conserved> sendbuf = pack_local_interior(grid);
+  // rank0 builds full interior buffer and scatters
+  std::vector<Conserved> local_interior(static_cast<std::size_t>(NX_GLOBAL) * mp.ny_local);
 
-    // Prepare recv on rank0
-    std::vector<int> recvcounts, displs;
-    std::vector<Conserved> recvbuf;
+  if (size == 1) {
+    initialize_shock_bubble(grid);
+  } else {
+    if (rank == 0) {
+      Grid g_full;
+      g_full.init(NX_GLOBAL, NY_GLOBAL, NG, X_LEN, Y_LEN);
+      initialize_shock_bubble(g_full);
 
-    if (mp.rank == 0) {
-      recvcounts.resize(mp.size);
-      displs.resize(mp.size);
-
-      // Recompute the same ny_local per rank to form recvcounts/displs
-      const int base = ny_global / mp.size;
-      const int rem  = ny_global % mp.size;
-
-      int disp = 0;
-      for (int r = 0; r < mp.size; ++r) {
-        const int ny_r = base + (r < rem ? 1 : 0);
-        recvcounts[r] = nx_global * ny_r; // in Conserved units
-        displs[r]     = disp;
-        disp         += recvcounts[r];
+      std::vector<Conserved> full_interior(static_cast<std::size_t>(NX_GLOBAL) * NY_GLOBAL);
+      for (int j = 0; j < NY_GLOBAL; ++j) {
+        const Conserved* src = &g_full.U[g_full.idx(NG, NG + j)];
+        Conserved* dst = &full_interior[static_cast<std::size_t>(j) * NX_GLOBAL];
+        std::copy(src, src + NX_GLOBAL, dst);
       }
 
-      recvbuf.resize(static_cast<size_t>(nx_global) * static_cast<size_t>(ny_global));
+      MPI_Scatterv(full_interior.data(),
+                   sendcounts.data(), displs.data(), T,
+                   local_interior.data(), static_cast<int>(local_interior.size()), T,
+                   0, MPI_COMM_WORLD);
+    } else {
+      MPI_Scatterv(nullptr, nullptr, nullptr, T,
+                   local_interior.data(), static_cast<int>(local_interior.size()), T,
+                   0, MPI_COMM_WORLD);
     }
 
-    // Gather to rank0
-    MPI_Gatherv(sendbuf.data(),
-                static_cast<int>(sendbuf.size()),
-                mpi_conserved_type(),
-                (mp.rank == 0 ? recvbuf.data() : nullptr),
-                (mp.rank == 0 ? recvcounts.data() : nullptr),
-                (mp.rank == 0 ? displs.data() : nullptr),
-                mpi_conserved_type(),
-                0,
-                mp.comm);
+    // unpack local interior into grid (leave ghosts; solver will fill)
+    for (int j = 0; j < mp.ny_local; ++j) {
+      Conserved* dst = &grid.U[grid.idx(NG, NG + j)];
+      const Conserved* src = &local_interior[static_cast<std::size_t>(j) * NX_GLOBAL];
+      std::copy(src, src + NX_GLOBAL, dst);
+    }
+  }
 
-    // Rank0 writes single CSV
-    if (mp.rank == 0) {
-      const std::string fname = make_filename(out_dir, step_id, time_now);
-      write_global_csv_rank0(recvbuf, nx_global, ny_global, ng, Lx, Ly, dx, dy, fname);
-      std::cout << "Wrote: " << fname << "\n";
+  int step = 0;
+  double t = 0.0;
+
+  // ----------------- output helper: gather interior to rank0 and write with existing utils -----------------
+  auto write_global_snapshot = [&](int step_now, double t_now) {
+    if (!ENABLE_OUTPUT) return;
+
+    std::vector<Conserved> local = pack_local_interior(grid);
+
+    std::vector<int> recvcounts, rdispls;
+    std::vector<Conserved> all;
+
+    if (rank == 0) {
+      recvcounts.resize(size);
+      rdispls.resize(size);
+      for (int r = 0; r < size; ++r) {
+        const int base = NY_GLOBAL / size;
+        const int rem  = NY_GLOBAL % size;
+        const int ny_r = base + (r < rem ? 1 : 0);
+        const int y0_r = r * base + std::min(r, rem);
+        recvcounts[r] = ny_r * NX_GLOBAL;
+        rdispls[r]    = y0_r * NX_GLOBAL;
+      }
+      all.resize(static_cast<std::size_t>(NX_GLOBAL) * NY_GLOBAL);
+    }
+
+    MPI_Gatherv(local.data(), static_cast<int>(local.size()), T,
+                rank == 0 ? all.data() : nullptr,
+                rank == 0 ? recvcounts.data() : nullptr,
+                rank == 0 ? rdispls.data() : nullptr,
+                T, 0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+      Grid g_full;
+      g_full.init(NX_GLOBAL, NY_GLOBAL, NG, X_LEN, Y_LEN);
+      unpack_global_interior(g_full, all);
+
+      // We do NOT need serial apply_boundary_conditions for output if write_grid_csv writes interior.
+      // If your write_grid_csv uses ghosts, then you should refactor BC into a shared bc.cpp.
+      write_grid_csv(g_full, make_filename(out_dir, step_now, t_now));
     }
   };
 
-  // Output at t=0
-  do_output(step, t);
-  next_out_idx = 1;
-
-  // ----------------- Time loop -----------------
-  while (t < t_end) {
-    // global dt
-    const double dt = compute_dt_mpi(grid, mp, cfl);
-
-    // clamp last step
-    const double dt_eff = (t + dt > t_end) ? (t_end - t) : dt;
-
-    advance_one_step_mpi(grid, mp, dt_eff);
-
-    t += dt_eff;
-    step++;
-
-    // Output when crossing scheduled times
-    while (next_out_idx < static_cast<int>(out_times.size()) && t >= out_times[next_out_idx] - 1e-15) {
-      do_output(step, t);
-      next_out_idx++;
-    }
+  // Write t=0 (same behavior as serial)
+  if (ENABLE_OUTPUT) {
+    write_global_snapshot(step, t);
   }
 
-  if (mp.rank == 0) {
-    std::cout << "Finished. Steps = " << step << "\n";
+  // ----------------- Physical time settings (same as serial) -----------------
+  const double cfl = 0.4;
+
+  const double T_collision = get_collision_time();
+  const double T_ref       = get_time_ref();
+
+  const double t_end = T_collision + 19.0 * T_ref;
+
+  const double tstar_targets[] =
+      {0.6, 1.2, 1.8, 3.0, 4.6, 6.2, 7.8, 9.4, 12.6, 17.4, 19.0};
+
+  const int n_targets = static_cast<int>(sizeof(tstar_targets) / sizeof(tstar_targets[0]));
+
+  double targets_phys[n_targets];
+  for (int k = 0; k < n_targets; ++k) {
+    targets_phys[k] = T_collision + tstar_targets[k] * T_ref;
+  }
+
+  int next_k = 0;
+
+  // ----------------- Main loop (same structure as serial) -----------------
+  double dt = compute_dt_mpi(grid, mp, cfl);
+
+  while (t < t_end) {
+    if (t + dt > t_end)
+      dt = t_end - t;
+
+    // force exact hit of next output time
+    if (ENABLE_OUTPUT && next_k < n_targets) {
+      const double t_out = targets_phys[next_k];
+      if (t < t_out && t + dt > t_out) {
+        dt = t_out - t;
+      }
+    }
+
+    advance_one_step_mpi(grid, mp, dt);
+
+    t += dt;
+    step++;
+
+    if (ENABLE_OUTPUT && next_k < n_targets) {
+      const double t_out = targets_phys[next_k];
+
+      if (t + 1e-15 >= t_out) {
+        double t_star = (t - T_collision) / T_ref;
+
+        if (rank == 0) {
+          std::cout << "Writing t* = "
+                    << t_star
+                    << "  (physical t = "
+                    << t << ")\n";
+        }
+
+        write_global_snapshot(step, t);
+
+        next_k++;
+      }
+    }
+
+    dt = compute_dt_mpi(grid, mp, cfl);
+  }
+
+  if (rank == 0) {
+    std::cout << "Finished. Steps = " << step << std::endl;
   }
 
   MPI_Finalize();
