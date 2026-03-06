@@ -227,8 +227,8 @@ void advance_one_step(Grid& grid, double dt) {
 #pragma omp for collapse(2) schedule(static)
 #endif
     for (int j = 0; j < ny; ++j) {
-      const int J = j + ng;
       for (int iface = 0; iface <= nx; ++iface) {
+        const int J = j + ng;
         const int IL = ng + iface - 1;
         const int IR = ng + iface;
 
@@ -250,10 +250,9 @@ void advance_one_step(Grid& grid, double dt) {
 #pragma omp for collapse(2) schedule(static)
 #endif
     for (int iface = 0; iface <= ny; ++iface) {
-      const int JB = ng + iface - 1;
-      const int JT = ng + iface;
-
       for (int i = 0; i < nx; ++i) {
+        const int JB = ng + iface - 1;
+        const int JT = ng + iface;
         const int I = i + ng;
 
         const auto idB = grid.idx(I, JB);
