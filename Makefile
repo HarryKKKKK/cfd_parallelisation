@@ -4,7 +4,9 @@ MPICXX   := mpicxx
 CXXFLAGS := -O3 -std=c++17 -Iheader
 OMPFLAGS := -fopenmp
 
-# sources used by ALL variants
+# =========================
+# Common sources
+# =========================
 BASE_SRC := \
   src/init.cpp \
   src/physics.cpp \
@@ -14,38 +16,66 @@ BASE_SRC := \
 SERIAL_SOLVER_SRC := src/solver.cpp
 MPI_SOLVER_SRC    := src/mpi_solver.cpp
 
-MAIN_SERIAL      := main_output.cpp
-MAIN_MPI_OUTPUT  := main_mpi.cpp
-MAIN_MPI_STRONG  := main_strong.cpp
-MAIN_MPI_WEAK    := main_weak.cpp
+# =========================
+# Main files
+# =========================
+MAIN_OUTPUT        := main_output.cpp
+MAIN_OUTPUT_MPI    := main_output_mpi.cpp
+MAIN_BASELINE      := main_baseline.cpp
+MAIN_BASELINE_MPI  := main_baseline_mpi.cpp
 
-.PHONY: all serial omp mpi mpi_strong mpi_weak clean
+# =========================
+# Phony targets
+# =========================
+.PHONY: all output scaling clean \
+        serial_output omp_output mpi_output \
+        serial_scaling omp_scaling mpi_scaling
 
-all: serial omp mpi mpi_strong mpi_weak
+# Build everything
+all: output scaling
 
-# ---- serial / omp use the serial solver.cpp ----
-serial: serial.exe
-omp: omp.exe
+# =========================
+# Group targets
+# =========================
+output: serial_output.exe omp_output.exe mpi_output.exe
+scaling: serial_scaling.exe omp_scaling.exe mpi_scaling.exe
 
-serial.exe: $(MAIN_SERIAL) $(BASE_SRC) $(SERIAL_SOLVER_SRC)
+serial_output: serial_output.exe
+omp_output: omp_output.exe
+mpi_output: mpi_output.exe
+
+serial_scaling: serial_scaling.exe
+omp_scaling: omp_scaling.exe
+mpi_scaling: mpi_scaling.exe
+
+# =========================
+# Output executables
+# =========================
+serial_output.exe: $(MAIN_OUTPUT) $(BASE_SRC) $(SERIAL_SOLVER_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-omp.exe: $(MAIN_SERIAL) $(BASE_SRC) $(SERIAL_SOLVER_SRC)
+omp_output.exe: $(MAIN_OUTPUT) $(BASE_SRC) $(SERIAL_SOLVER_SRC)
 	$(CXX) $(CXXFLAGS) $(OMPFLAGS) $^ -o $@
 
-# ---- mpi variants use mpi_solver.cpp (do NOT link solver.cpp) ----
-mpi: mpi.exe
-mpi_strong: mpi_strong.exe
-mpi_weak: mpi_weak.exe
-
-mpi.exe: $(MAIN_MPI_OUTPUT) $(BASE_SRC) $(MPI_SOLVER_SRC)
+mpi_output.exe: $(MAIN_OUTPUT_MPI) $(BASE_SRC) $(MPI_SOLVER_SRC)
 	$(MPICXX) $(CXXFLAGS) $^ -o $@
 
-mpi_strong.exe: $(MAIN_MPI_STRONG) $(BASE_SRC) $(MPI_SOLVER_SRC)
+# =========================
+# Scaling / baseline executables
+# =========================
+serial_scaling.exe: $(MAIN_BASELINE) $(BASE_SRC) $(SERIAL_SOLVER_SRC)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+omp_scaling.exe: $(MAIN_BASELINE) $(BASE_SRC) $(SERIAL_SOLVER_SRC)
+	$(CXX) $(CXXFLAGS) $(OMPFLAGS) $^ -o $@
+
+mpi_scaling.exe: $(MAIN_BASELINE_MPI) $(BASE_SRC) $(MPI_SOLVER_SRC)
 	$(MPICXX) $(CXXFLAGS) $^ -o $@
 
-mpi_weak.exe: $(MAIN_MPI_WEAK) $(BASE_SRC) $(MPI_SOLVER_SRC)
-	$(MPICXX) $(CXXFLAGS) $^ -o $@
-
+# =========================
+# Clean
+# =========================
 clean:
-	rm -f serial.exe omp.exe mpi.exe mpi_strong.exe mpi_weak.exe
+	rm -f \
+	  serial_output.exe omp_output.exe mpi_output.exe \
+	  serial_scaling.exe omp_scaling.exe mpi_scaling.exe

@@ -102,3 +102,71 @@ void initialize_shock_bubble(Grid& grid) {
 
     fill_transmissive_ghosts(grid);
 }
+
+void initialize_shock_bubble_weak(Grid& grid, int copies_y) {
+    const double a0 = std::sqrt(phys::gamma * phys::p0 / phys::rho_air);
+
+    const double M2 = phys::mach * phys::mach;
+
+    const double rho2 = phys::rho_air * ((phys::gamma + 1.0) * M2) /
+                        ((phys::gamma - 1.0) * M2 + 2.0);
+
+    const double p2 = phys::p0 * (1.0 + 2.0 * phys::gamma / (phys::gamma + 1.0) *
+                                  (M2 - 1.0));
+
+    const double u2 = 2.0 * a0 / (phys::gamma + 1.0) *
+                      (phys::mach - 1.0 / phys::mach);
+
+    const double R2 = phys::bubble_r * phys::bubble_r;
+
+    // base cell height of the original single-bubble problem
+    const double Ly_cell = 0.089;
+
+    for (int j = 0; j < grid.ny; ++j) {
+        for (int i = 0; i < grid.nx; ++i) {
+
+            const int I = i + grid.ng;
+            const int J = j + grid.ng;
+
+            const double x = grid.x0 + (i + 0.5) * grid.dx;
+            const double y = grid.y0 + (j + 0.5) * grid.dy;
+
+            // Map global y back into one repeated cell [0, Ly_cell)
+            double y_cell = std::fmod(y, Ly_cell);
+            if (y_cell < 0.0) {
+                y_cell += Ly_cell;
+            }
+
+            Primitive W;
+
+            // Post-shock air (left of shock)
+            if (x < phys::shock_x) {
+                W.rho = rho2;
+                W.u   = u2;
+                W.v   = 0.0;
+                W.p   = p2;
+            } else {
+                // Pre-shock air
+                W.rho = phys::rho_air;
+                W.u   = 0.0;
+                W.v   = 0.0;
+                W.p   = phys::p0;
+            }
+
+            // Helium bubble overrides density only
+            // IMPORTANT:
+            // use y_cell instead of y, so the bubble is duplicated in y-direction
+            const double rx = x - phys::bubble_x;
+            const double ry = y_cell - phys::bubble_y;
+            const double r2 = rx * rx + ry * ry;
+
+            if (r2 <= R2) {
+                W.rho = phys::rho_helium;
+            }
+
+            grid.U[grid.idx(I, J)] = primitive_to_conserved(W);
+        }
+    }
+
+    fill_transmissive_ghosts(grid);
+}
