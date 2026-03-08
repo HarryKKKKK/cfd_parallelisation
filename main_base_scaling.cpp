@@ -1,40 +1,52 @@
 #include "types.hpp"
+#include "physics.hpp"
 #include "solver.hpp"
 #include "init.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
-#include <iomanip>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-int main() {
-    // fixed problem setup
-    const int nx = 500;
-    const int ny = 197;
+int main(int argc, char** argv) {
+    // fixed parameters
+    const int nx_base = 500;
+    const int ny_base = 197;
     const int ng = 2;
     const double Lx = 0.225;
-    const double Ly = 0.089;
+    const double Ly_base = 0.089;
     const double cfl = 0.4;
     const double t_end = 0.0011741;
 
+    // variable parameters for scaling
+    int nx = nx_base;
+    int copies_y = 1;
+
+    // Usage:
+    //   ./serial_scaling.exe [nx] [copies_y]
+    //   ./omp_scaling.exe    [nx] [copies_y]
+
+    if (argc >= 2) {
+        nx = std::atoi(argv[1]);
+    }
+    if (argc >= 3) {
+        copies_y = std::atoi(argv[2]);
+    }
+
+    if (nx <= 0 || copies_y <= 0) {
+        std::cerr << "Error: nx and copies_y must be positive.\n";
+        return 1;
+    }
+
+    const int ny = ny_base * copies_y;
+    const double Ly = Ly_base * copies_y;
+
     Grid grid;
     grid.init(nx, ny, ng, Lx, Ly);
-    initialize_shock_bubble(grid);
-
-    std::cout << std::setprecision(12);
-    std::cout << "[INIT] nx=" << nx
-              << " ny=" << ny
-              << " ng=" << ng
-              << " Lx=" << Lx
-              << " Ly=" << Ly
-              << " dx=" << grid.dx
-              << " dy=" << grid.dy
-              << " cfl=" << cfl
-              << " t_end=" << t_end
-              << std::endl;
+    initialize_shock_bubble_weak(grid, copies_y);
 
     int step = 0;
     double t = 0.0;
@@ -43,23 +55,9 @@ int main() {
 
     double dt = compute_dt(grid, cfl);
 
-    std::cout << "[INIT] initial dt=" << dt << std::endl;
-
     while (t < t_end) {
         if (t + dt > t_end) {
             dt = t_end - t;
-        }
-
-        if (step % 500 == 0) {
-            auto now = std::chrono::steady_clock::now();
-            double wall_so_far =
-                std::chrono::duration<double>(now - t0).count();
-
-            std::cout << "[LOOP] step=" << step
-                      << " t=" << t
-                      << " dt=" << dt
-                      << " wall_so_far=" << wall_so_far
-                      << std::endl;
         }
 
         advance_one_step(grid, dt);
@@ -85,6 +83,7 @@ int main() {
     std::cout << " p=" << p
               << " nx=" << nx
               << " ny=" << ny
+              << " copies_y=" << copies_y
               << " steps=" << step
               << " wall_seconds=" << wall
               << std::endl;

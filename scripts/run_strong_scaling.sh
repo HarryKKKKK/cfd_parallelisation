@@ -1,32 +1,29 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -u -o pipefail
 
-# =========================
-# Config
-# =========================
-NX=${1:-500}
-NY=${2:-197}
-TEND=${3:-0.0011741}
-REPEAT=${4:-5}
+# Usage:
+#   bash run_strong_scaling.sh
+#
+# Optional environment overrides:
+#   OMP_LIST="1 2 4 8 16" MPI_LIST="1 2 4 8 16" OUTDIR="results/strong_scaling" bash run_strong_scaling.sh
 
 OMP_LIST="${OMP_LIST:-1 2 4 8 16}"
 MPI_LIST="${MPI_LIST:-1 2 4 8 16}"
 
-SERIAL_EXE="${SERIAL_EXE:-./serial_scaling.exe}"
-OMP_EXE="${OMP_EXE:-./omp_scaling.exe}"
-MPI_EXE="${MPI_EXE:-./mpi_scaling.exe}"
+SERIAL_EXE="${SERIAL_EXE:-./serial_base.exe}"
+OMP_EXE="${OMP_EXE:-./omp_base.exe}"
+MPI_EXE="${MPI_EXE:-./mpi_base.exe}"
 
-OUTDIR="${OUTDIR:-results}"
+OUTDIR="${OUTDIR:-results/strong_scaling}"
 mkdir -p "${OUTDIR}"
 
 RAW_CSV="${OUTDIR}/strong_scaling_raw.csv"
 LOGFILE="${OUTDIR}/strong_scaling.log"
+FAILFILE="${OUTDIR}/strong_scaling_failed.log"
 
-# =========================
-# CSV header
-# =========================
-echo "mode,p,run_id,nx,ny,t_end,wall_seconds" > "${RAW_CSV}"
+echo "mode,p,wall_seconds,steps,status" > "${RAW_CSV}"
 : > "${LOGFILE}"
+: > "${FAILFILE}"
 
 extract_field() {
     local key="$1"
@@ -41,56 +38,54 @@ extract_field() {
 run_and_record() {
     local mode="$1"
     local p="$2"
-    local run_id="$3"
-    shift 3
+    shift 2
 
-    echo "Running mode=${mode} p=${p} run=${run_id}" | tee -a "${LOGFILE}"
+    echo "Running mode=${mode} p=${p}" | tee -a "${LOGFILE}"
 
     local output
-    output=$("$@")
+    local rc=0
 
-    echo "${output}" >> "${LOGFILE}"
+    if output=$("$@" 2>&1); then
+        echo "${output}" >> "${LOGFILE}"
 
-    local wall
-    wall=$(echo "${output}" | extract_field wall_seconds)
+        local wall
+        local steps
+        wall=$(echo "${output}" | extract_field wall_seconds)
+        steps=$(echo "${output}" | extract_field steps)
 
-    if [[ -z "${wall}" ]]; then
-        echo "ERROR: wall_seconds not found in output" | tee -a "${LOGFILE}"
-        echo "Output was: ${output}" | tee -a "${LOGFILE}"
-        exit 1
+        if [[ -z "${wall}" ]]; then
+            echo "FAILED: missing wall_seconds | mode=${mode} p=${p}" | tee -a "${LOGFILE}" "${FAILFILE}"
+            echo "${mode},${p},,${steps:-},missing_wall_seconds" >> "${RAW_CSV}"
+        else
+            echo "${mode},${p},${wall},${steps:-},ok" >> "${RAW_CSV}"
+        fi
+    else
+        rc=$?
+        echo "${output}" >> "${LOGFILE}"
+        echo "FAILED: exit_code=${rc} | mode=${mode} p=${p}" | tee -a "${LOGFILE}" "${FAILFILE}"
+        echo "${mode},${p},,,failed_exit_${rc}" >> "${RAW_CSV}"
     fi
-
-    echo "${mode},${p},${run_id},${NX},${NY},${TEND},${wall}" >> "${RAW_CSV}"
 }
 
-# =========================
-# Serial
-# =========================
-for r in $(seq 1 "${REPEAT}"); do
-    run_and_record "serial" 1 "${r}" \
-        "${SERIAL_EXE}" "${NX}" "${NY}" "${TEND}"
-done
+echo "[checkpoint] start serial" | tee -a "${LOGFILE}"
+run_and_record "serial" 1 "${SERIAL_EXE}"
+echo "[checkpoint] finished serial" | tee -a "${LOGFILE}"
 
-# =========================
-# OpenMP
-# =========================
+echo "[checkpoint] start omp" | tee -a "${LOGFILE}"
 for p in ${OMP_LIST}; do
-    for r in $(seq 1 "${REPEAT}"); do
-        run_and_record "omp" "${p}" "${r}" \
-            env OMP_NUM_THREADS="${p}" "${OMP_EXE}" "${NX}" "${NY}" "${TEND}"
-    done
+    run_and_record "omp" "${p}" \
+        env OMP_NUM_THREADS="${p}" "${OMP_EXE}"
 done
+echo "[checkpoint] finished omp" | tee -a "${LOGFILE}"
 
-# =========================
-# MPI
-# =========================
+echo "[checkpoint] start mpi" | tee -a "${LOGFILE}"
 for p in ${MPI_LIST}; do
-    for r in $(seq 1 "${REPEAT}"); do
-        run_and_record "mpi" "${p}" "${r}" \
-            mpirun -np "${p}" "${MPI_EXE}" "${NX}" "${NY}" "${TEND}"
-    done
+    run_and_record "mpi" "${p}" \
+        mpirun -np "${p}" "${MPI_EXE}"
 done
+echo "[checkpoint] finished mpi" | tee -a "${LOGFILE}"
 
 echo "Done."
-echo "Raw data: ${RAW_CSV}"
-echo "Log file: ${LOGFILE}"
+echo "Raw data:   ${RAW_CSV}"
+echo "Main log:   ${LOGFILE}"
+echo "Fail log:   ${FAILFILE}"
