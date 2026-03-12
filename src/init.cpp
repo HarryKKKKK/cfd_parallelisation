@@ -101,6 +101,7 @@ void initialize_shock_bubble(Grid& grid) {
     }
 
     fill_transmissive_ghosts(grid);
+    grid.U_new = grid.U;
 }
 
 void initialize_shock_bubble_weak(Grid& grid, int copies_y) {
@@ -169,4 +170,5 @@ void initialize_shock_bubble_weak(Grid& grid, int copies_y) {
     }
 
     fill_transmissive_ghosts(grid);
+    grid.U_new = grid.U;
 }

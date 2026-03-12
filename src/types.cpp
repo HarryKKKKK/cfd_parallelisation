@@ -11,4 +11,5 @@ void Grid::init(int nx_, int ny_, int ng_,
     dx = Lx / nx;
     dy = Ly / ny;
     U.resize((nx + 2*ng) * (ny + 2*ng));
+    U_new.resize((nx + 2*ng) * (ny + 2*ng));
 }
