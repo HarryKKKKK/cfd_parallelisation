@@ -1,0 +1,2 @@
+mode=omp p=2 nx=500 ny=77618 copies_y=394 steps=7198 wall_seconds=96291
+Running mode=omp p=2 run=3 nx=500 ny=394

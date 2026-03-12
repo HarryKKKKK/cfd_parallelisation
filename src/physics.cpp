@@ -5,57 +5,6 @@
 #include <cmath>
 #include <stdexcept>
 
-// A small POD to hold decoded state (no allocations)
-struct Decoded {
-    double rho, u, v, p, a;
-};
-
-// Decode from Conserved once: rho,u,v,p,a
-static inline Decoded decode_state(const Conserved& U) {
-    Decoded d;
-    d.rho = U.rho;
-
-    // If you want max speed, avoid throws inside hot loops.
-    // For debugging, keep them behind a macro.
-#ifndef NDEBUG
-    if (d.rho <= 0.0) throw std::runtime_error("Non-positive density encountered.");
-#endif
-
-    const double inv_rho = 1.0 / d.rho;
-    d.u = U.rhou * inv_rho;
-    d.v = U.rhov * inv_rho;
-
-    const double kinetic = 0.5 * d.rho * (d.u*d.u + d.v*d.v);
-    d.p = (phys::gamma - 1.0) * (U.E - kinetic);
-
-#ifndef NDEBUG
-    if (d.p <= 0.0) throw std::runtime_error("Non-positive pressure encountered.");
-#endif
-
-    d.a = std::sqrt(phys::gamma * d.p * inv_rho);
-    return d;
-}
-
-// Fluxes using decoded values (no repeated primitive conversion)
-static inline Conserved flux_x_decoded(const Conserved& U, double u, double p) {
-    Conserved F;
-    F.rho  = U.rhou;
-    F.rhou = U.rhou * u + p;
-    F.rhov = U.rhov * u;
-    F.E    = (U.E + p) * u;
-    return F;
-}
-
-static inline Conserved flux_y_decoded(const Conserved& U, double v, double p) {
-    Conserved G;
-    G.rho  = U.rhov;
-    G.rhou = U.rhou * v;
-    G.rhov = U.rhov * v + p;
-    G.E    = (U.E + p) * v;
-    return G;
-}
-
-
 double pressure_from_conserved(const Conserved& U) {
     // p = (gamma - 1) * (E - 0.5*rho*(u^2+v^2))
     const double rho = U.rho;
@@ -106,72 +55,14 @@ Conserved primitive_to_conserved(const Primitive& W) {
     return U;
 }
 
-Conserved flux_x(const Conserved& U) {
-    const auto d = decode_state(U);
-    return flux_x_decoded(U, d.u, d.p);
-}
-
-Conserved flux_y(const Conserved& U) {
-    const auto d = decode_state(U);
-    return flux_y_decoded(U, d.v, d.p);
-}
-
-
-double max_wave_speed_x(const Conserved& U) {
-    const auto d = decode_state(U);
-    return std::abs(d.u) + d.a;
-}
-double max_wave_speed_y(const Conserved& U) {
-    const auto d = decode_state(U);
-    return std::abs(d.v) + d.a;
-}
-
-
-Conserved hll_flux_x(const Conserved& UL, const Conserved& UR) {
-    const auto L = decode_state(UL);
-    const auto R = decode_state(UR);
-
-    const double SL = std::min(L.u - L.a, R.u - R.a);
-    const double SR = std::max(L.u + L.a, R.u + R.a);
-
-    const Conserved FL = flux_x_decoded(UL, L.u, L.p);
-    const Conserved FR = flux_x_decoded(UR, R.u, R.p);
-
-    if (SL >= 0.0) return FL;
-    if (SR <= 0.0) return FR;
-
-    const double inv = 1.0 / (SR - SL);
-
-    Conserved FH;
-    FH.rho  = (SR*FL.rho  - SL*FR.rho  + SL*SR*(UR.rho  - UL.rho )) * inv;
-    FH.rhou = (SR*FL.rhou - SL*FR.rhou + SL*SR*(UR.rhou - UL.rhou)) * inv;
-    FH.rhov = (SR*FL.rhov - SL*FR.rhov + SL*SR*(UR.rhov - UL.rhov)) * inv;
-    FH.E    = (SR*FL.E    - SL*FR.E    + SL*SR*(UR.E    - UL.E   )) * inv;
-    return FH;
-}
-
-Conserved hll_flux_y(const Conserved& UL, const Conserved& UR) {
-    const auto L = decode_state(UL);
-    const auto R = decode_state(UR);
-
-    const double SL = std::min(L.v - L.a, R.v - R.a);
-    const double SR = std::max(L.v + L.a, R.v + R.a);
-
-    const Conserved GL = flux_y_decoded(UL, L.v, L.p);
-    const Conserved GR = flux_y_decoded(UR, R.v, R.p);
-
-    if (SL >= 0.0) return GL;
-    if (SR <= 0.0) return GR;
-
-    const double inv = 1.0 / (SR - SL);
-
-    Conserved GH;
-    GH.rho  = (SR*GL.rho  - SL*GR.rho  + SL*SR*(UR.rho  - UL.rho )) * inv;
-    GH.rhou = (SR*GL.rhou - SL*GR.rhou + SL*SR*(UR.rhou - UL.rhou)) * inv;
-    GH.rhov = (SR*GL.rhov - SL*GR.rhov + SL*SR*(UR.rhov - UL.rhov)) * inv;
-    GH.E    = (SR*GL.E    - SL*GR.E    + SL*SR*(UR.E    - UL.E   )) * inv;
-    return GH;
-}
+// double max_wave_speed_x(const Conserved& U) {
+//     const auto d = decode_state(U);
+//     return std::abs(d.u) + d.a;
+// }
+// double max_wave_speed_y(const Conserved& U) {
+//     const auto d = decode_state(U);
+//     return std::abs(d.v) + d.a;
+// }
 
 double sound_speed(const Primitive& W)
 {

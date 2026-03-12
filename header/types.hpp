@@ -6,6 +6,27 @@ struct Conserved {
     double rhou;  
     double rhov; 
     double E;   
+
+    Conserved operator+(const Conserved& other) const {
+        return {rho + other.rho,
+                rhou + other.rhou,
+                rhov + other.rhov,
+                E + other.E};
+    }
+
+    Conserved operator-(const Conserved& other) const {
+        return {rho - other.rho,
+                rhou - other.rhou,
+                rhov - other.rhov,
+                E - other.E};
+    }
+
+    Conserved operator*(double s) const {
+        return {rho * s,
+                rhou * s,
+                rhov * s,
+                E * s};
+    }
 };
 
 struct Primitive {
