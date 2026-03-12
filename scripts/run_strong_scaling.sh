@@ -2,7 +2,7 @@
 #SBATCH --job-name=strong_scaling
 #SBATCH --partition=csc-mphil
 #SBATCH --clusters=CSC
-#SBATCH --account=yh610
+#SBATCH --account=hk597
 #SBATCH --nodes=1
 #SBATCH --ntasks=16
 #SBATCH --cpus-per-task=1
@@ -21,7 +21,7 @@ SERIAL_EXE="${SERIAL_EXE:-./serial_base.exe}"
 OMP_EXE="${OMP_EXE:-./omp_base.exe}"
 MPI_EXE="${MPI_EXE:-./mpi_base.exe}"
 
-OUTDIR="${OUTDIR:-results/strong_scaling}"
+OUTDIR="${OUTDIR:-results/strong_scaling/hllc}"
 mkdir -p "${OUTDIR}"
 
 RAW_CSV="${OUTDIR}/strong_scaling_raw.csv"

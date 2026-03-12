@@ -384,15 +384,10 @@ double compute_dt(const Grid& grid, double cfl) {
 // ============================================================
 // advance one step
 // ============================================================
-
 void advance_one_step(Grid& grid, double dt) {
   const int nx = grid.nx;
   const int ny = grid.ny;
   const int ng = grid.ng;
-
-  if (ng < 2) {
-    throw std::runtime_error("advance_one_step requires ng >= 2.");
-  }
 
   apply_boundary_conditions(grid);
 
@@ -401,48 +396,39 @@ void advance_one_step(Grid& grid, double dt) {
   const double dtdx = dt / grid.dx;
   const double dtdy = dt / grid.dy;
 
-  RowData row_prev, row_curr, row_next;
-  std::vector<Conserved> Fx_curr, Gy_prev, Gy_curr;
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+  {
+    RowData row_B, row_C, row_T;
+    std::vector<Conserved> Fx, Gy_B, Gy_T;
 
-  // Build row j=0 and j=1 in physical indexing
-  build_row_predictor(grid, ng + 0, cx, cy, row_curr);
-  build_row_predictor(grid, ng + 1, cx, cy, row_next);
+#ifdef _OPENMP
+    #pragma omp for schedule(static)
+#endif
+    for (int j = 0; j < ny; ++j) {
+      const int J = j + ng;
 
-  compute_flux_y_between_rows(row_curr, row_next, Gy_prev);
+      build_row_predictor(grid, J - 1, cx, cy, row_B);
+      build_row_predictor(grid, J,     cx, cy, row_C);
+      build_row_predictor(grid, J + 1, cx, cy, row_T);
 
-  for (int j = 0; j < ny; ++j) {
-    const int J = j + ng;
+      compute_flux_x_row(row_C, Fx);
+      compute_flux_y_between_rows(row_B, row_C, Gy_B);
+      compute_flux_y_between_rows(row_C, row_T, Gy_T);
 
-    compute_flux_x_row(row_curr, Fx_curr);
+      for (int i = 0; i < nx; ++i) {
+        const Conserved update =
+            (Fx[i + 1] - Fx[i]) * dtdx
+          + (Gy_T[i]   - Gy_B[i]) * dtdy;
 
-    if (j < ny - 1) {
-      compute_flux_y_between_rows(row_curr, row_next, Gy_curr);
-    } else {
-      // last physical row uses top ghost-connected row
-      RowData row_topghost;
-      build_row_predictor(grid, ng + ny, cx, cy, row_topghost);
-      compute_flux_y_between_rows(row_curr, row_topghost, Gy_curr);
-    }
-
-    for (int i = 0; i < nx; ++i) {
-      const Conserved update =
-          (Fx_curr[i + 1] - Fx_curr[i]) * dtdx
-        + (Gy_curr[i]     - Gy_prev[i]) * dtdy;
-
-      const int I = i + ng;
-      const int id = grid.idx(I, J);
-      grid.U[id] = grid.U[id] - update;
-    }
-
-    if (j < ny - 1) {
-      row_prev = std::move(row_curr);
-      row_curr = std::move(row_next);
-
-      if (j < ny - 2) {
-        build_row_predictor(grid, ng + j + 2, cx, cy, row_next);
+        const int I = i + ng;
+        const int id = grid.idx(I, J);
+        
+        grid.U_new[id] = grid.U[id] - update; 
       }
-
-      Gy_prev.swap(Gy_curr);
     }
   }
+
+  std::swap(grid.U, grid.U_new); 
 }

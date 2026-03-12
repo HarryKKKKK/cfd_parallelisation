@@ -43,6 +43,7 @@ struct Grid {
     double x0, y0;
 
     std::vector<Conserved> U;
+    std::vector<Conserved> U_new;
 
     void init(int nx_, int ny_, int ng_, double Lx, double Ly, double x0_ = 0.0, double y0_ = 0.0);
 
