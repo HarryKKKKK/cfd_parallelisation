@@ -1,18 +1,12 @@
 #include "mpi_solver.hpp"
 #include "constants.hpp"
 
-#include <mpi.h>
-
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
 
 namespace {
-
-// ============================================================
-// Small helpers
-// ============================================================
 
 struct Decoded {
   double rho, u, v, p, a;
@@ -319,7 +313,33 @@ static MPI_Datatype make_conserved_type() {
 } // namespace
 
 // ============================================================
-// limiter
+// Domain decomposition
+// ============================================================
+
+MpiDomain make_mpi_domain_y_slab(int nx_global, int ny_global, int ng, MPI_Comm comm) {
+  MpiDomain mp;
+  mp.comm = comm;
+  mp.nx_global = nx_global;
+  mp.ny_global = ny_global;
+  mp.ng = ng;
+
+  MPI_Comm_rank(comm, &mp.rank);
+  MPI_Comm_size(comm, &mp.size);
+
+  const int base = ny_global / mp.size;
+  const int rem  = ny_global % mp.size;
+
+  mp.ny_local  = base + (mp.rank < rem ? 1 : 0);
+  mp.y0_global = mp.rank * base + std::min(mp.rank, rem);
+
+  mp.nbr_down = (mp.rank == 0) ? MPI_PROC_NULL : mp.rank - 1;
+  mp.nbr_up   = (mp.rank == mp.size - 1) ? MPI_PROC_NULL : mp.rank + 1;
+
+  return mp;
+}
+
+// ============================================================
+// Limiter
 // ============================================================
 
 double minmod(double a, double b) {
@@ -328,16 +348,12 @@ double minmod(double a, double b) {
 }
 
 // ============================================================
-// Physical + MPI ghost fill
+// Physical BC only (same transmissive semantics as serial)
 // ============================================================
 
-void apply_boundary_conditions_mpi(Grid& g, MPI_Comm comm) {
+void apply_boundary_conditions_mpi(Grid& g, const MpiDomain& mp) {
   const int ng = g.ng;
   if (ng <= 0) return;
-
-  int rank, size;
-  MPI_Comm_rank(comm, &rank);
-  MPI_Comm_size(comm, &size);
 
   const int nx = g.nx;
   const int ny = g.ny;
@@ -349,9 +365,6 @@ void apply_boundary_conditions_mpi(Grid& g, MPI_Comm comm) {
   const int jB = ng;
   const int jT = ng + ny - 1;
 
-  // ----------------------------------------------------------
-  // x-direction physical BC (all ranks)
-  // ----------------------------------------------------------
   for (int J = 0; J < ny_tot; ++J) {
     for (int gc = 0; gc < ng; ++gc) {
       g.U[g.idx(gc, J)]              = g.U[g.idx(iL, J)];
@@ -359,80 +372,91 @@ void apply_boundary_conditions_mpi(Grid& g, MPI_Comm comm) {
     }
   }
 
-  // ----------------------------------------------------------
-  // y-direction:
-  // rank boundary -> transmissive physical BC
-  // internal boundary -> MPI exchange ghost rows
-  // ----------------------------------------------------------
-  const int up_rank   = (rank == 0)        ? MPI_PROC_NULL : rank - 1;
-  const int down_rank = (rank == size - 1) ? MPI_PROC_NULL : rank + 1;
-
-  MPI_Datatype cons_type = make_conserved_type();
-
-  std::vector<Conserved> send_up(static_cast<std::size_t>(ng) * nx_tot);
-  std::vector<Conserved> recv_up(static_cast<std::size_t>(ng) * nx_tot);
-  std::vector<Conserved> send_down(static_cast<std::size_t>(ng) * nx_tot);
-  std::vector<Conserved> recv_down(static_cast<std::size_t>(ng) * nx_tot);
-
-  // pack top interior ng rows -> send to up neighbor's bottom ghosts
-  for (int gr = 0; gr < ng; ++gr) {
-    const int Jsrc = ng + gr;
+  if (mp.nbr_down == MPI_PROC_NULL) {
     for (int I = 0; I < nx_tot; ++I) {
-      send_up[static_cast<std::size_t>(gr) * nx_tot + I] = g.U[g.idx(I, Jsrc)];
+      for (int gr = 0; gr < ng; ++gr) {
+        g.U[g.idx(I, gr)] = g.U[g.idx(I, jB)];
+      }
     }
   }
 
-  // pack bottom interior ng rows -> send to down neighbor's top ghosts
+  if (mp.nbr_up == MPI_PROC_NULL) {
+    for (int I = 0; I < nx_tot; ++I) {
+      for (int gr = 0; gr < ng; ++gr) {
+        g.U[g.idx(I, ny_tot - 1 - gr)] = g.U[g.idx(I, jT)];
+      }
+    }
+  }
+}
+
+// ============================================================
+// Halo exchange in y only
+// ============================================================
+
+void exchange_halo_y_mpi(Grid& g, const MpiDomain& mp) {
+  const int ng = g.ng;
+  if (ng <= 0) return;
+
+  const int nx = g.nx;
+  const int ny = g.ny;
+  const int nx_tot = nx + 2 * ng;
+  const int jB = ng;
+  const int jT = ng + ny - 1;
+
+  MPI_Datatype cons_type = make_conserved_type();
+
+  std::vector<Conserved> send_down(static_cast<std::size_t>(ng) * nx_tot);
+  std::vector<Conserved> recv_down(static_cast<std::size_t>(ng) * nx_tot);
+  std::vector<Conserved> send_up(static_cast<std::size_t>(ng) * nx_tot);
+  std::vector<Conserved> recv_up(static_cast<std::size_t>(ng) * nx_tot);
+
+  for (int gr = 0; gr < ng; ++gr) {
+    const int Jsrc = jB + gr;
+    for (int I = 0; I < nx_tot; ++I) {
+      send_down[static_cast<std::size_t>(gr) * nx_tot + I] = g.U[g.idx(I, Jsrc)];
+    }
+  }
+
   for (int gr = 0; gr < ng; ++gr) {
     const int Jsrc = jT - ng + 1 + gr;
     for (int I = 0; I < nx_tot; ++I) {
-      send_down[static_cast<std::size_t>(gr) * nx_tot + I] = g.U[g.idx(I, Jsrc)];
+      send_up[static_cast<std::size_t>(gr) * nx_tot + I] = g.U[g.idx(I, Jsrc)];
     }
   }
 
   MPI_Request reqs[4];
   int nreq = 0;
 
-  if (up_rank != MPI_PROC_NULL) {
-    MPI_Irecv(recv_up.data(),   static_cast<int>(recv_up.size()),   cons_type, up_rank,   101, comm, &reqs[nreq++]);
-    MPI_Isend(send_up.data(),   static_cast<int>(send_up.size()),   cons_type, up_rank,   202, comm, &reqs[nreq++]);
+  if (mp.nbr_down != MPI_PROC_NULL) {
+    MPI_Irecv(recv_down.data(), static_cast<int>(recv_down.size()), cons_type,
+              mp.nbr_down, 101, mp.comm, &reqs[nreq++]);
+    MPI_Isend(send_down.data(), static_cast<int>(send_down.size()), cons_type,
+              mp.nbr_down, 202, mp.comm, &reqs[nreq++]);
   }
 
-  if (down_rank != MPI_PROC_NULL) {
-    MPI_Irecv(recv_down.data(), static_cast<int>(recv_down.size()), cons_type, down_rank, 202, comm, &reqs[nreq++]);
-    MPI_Isend(send_down.data(), static_cast<int>(send_down.size()), cons_type, down_rank, 101, comm, &reqs[nreq++]);
+  if (mp.nbr_up != MPI_PROC_NULL) {
+    MPI_Irecv(recv_up.data(), static_cast<int>(recv_up.size()), cons_type,
+              mp.nbr_up, 202, mp.comm, &reqs[nreq++]);
+    MPI_Isend(send_up.data(), static_cast<int>(send_up.size()), cons_type,
+              mp.nbr_up, 101, mp.comm, &reqs[nreq++]);
   }
 
   if (nreq > 0) {
     MPI_Waitall(nreq, reqs, MPI_STATUSES_IGNORE);
   }
 
-  // top ghost rows
-  if (up_rank == MPI_PROC_NULL) {
+  if (mp.nbr_down != MPI_PROC_NULL) {
     for (int gr = 0; gr < ng; ++gr) {
       for (int I = 0; I < nx_tot; ++I) {
-        g.U[g.idx(I, gr)] = g.U[g.idx(I, jB)];
-      }
-    }
-  } else {
-    for (int gr = 0; gr < ng; ++gr) {
-      for (int I = 0; I < nx_tot; ++I) {
-        g.U[g.idx(I, gr)] = recv_up[static_cast<std::size_t>(gr) * nx_tot + I];
+        g.U[g.idx(I, gr)] = recv_down[static_cast<std::size_t>(gr) * nx_tot + I];
       }
     }
   }
 
-  // bottom ghost rows
-  if (down_rank == MPI_PROC_NULL) {
+  if (mp.nbr_up != MPI_PROC_NULL) {
     for (int gr = 0; gr < ng; ++gr) {
       for (int I = 0; I < nx_tot; ++I) {
-        g.U[g.idx(I, ny_tot - 1 - gr)] = g.U[g.idx(I, jT)];
-      }
-    }
-  } else {
-    for (int gr = 0; gr < ng; ++gr) {
-      for (int I = 0; I < nx_tot; ++I) {
-        g.U[g.idx(I, jT + 1 + gr)] = recv_down[static_cast<std::size_t>(gr) * nx_tot + I];
+        g.U[g.idx(I, jT + 1 + gr)] = recv_up[static_cast<std::size_t>(gr) * nx_tot + I];
       }
     }
   }
@@ -441,10 +465,10 @@ void apply_boundary_conditions_mpi(Grid& g, MPI_Comm comm) {
 }
 
 // ============================================================
-// dt
+// CFL dt: same formula as serial, with global MPI reduction
 // ============================================================
 
-double compute_dt_mpi(const Grid& grid, double cfl, MPI_Comm comm) {
+double compute_dt_mpi(const Grid& grid, const MpiDomain& mp, double cfl) {
   const int nx = grid.nx;
   const int ny = grid.ny;
   const int ng = grid.ng;
@@ -463,45 +487,37 @@ double compute_dt_mpi(const Grid& grid, double cfl, MPI_Comm comm) {
   }
 
   double amax_global = 0.0;
-  MPI_Allreduce(&amax_local, &amax_global, 1, MPI_DOUBLE, MPI_MAX, comm);
+  MPI_Allreduce(&amax_local, &amax_global, 1, MPI_DOUBLE, MPI_MAX, mp.comm);
 
   if (amax_global <= 0.0) return 1e-12;
   return cfl * h / amax_global;
 }
 
 // ============================================================
-// advance one step
+// One-step advance: same algorithmic kernel as serial
 // ============================================================
 
-void advance_one_step_mpi(Grid& grid, double dt, MPI_Comm comm) {
+void advance_one_step_mpi(Grid& grid, const MpiDomain& mp, double dt) {
   const int nx = grid.nx;
   const int ny = grid.ny;
   const int ng = grid.ng;
 
-  if (ng < 2) {
-    throw std::runtime_error("advance_one_step_mpi requires ng >= 2.");
-  }
-
-  apply_boundary_conditions_mpi(grid, comm);
+  apply_boundary_conditions_mpi(grid, mp);
+  exchange_halo_y_mpi(grid, mp);
+  apply_boundary_conditions_mpi(grid, mp);
 
   const double cx = dt / (2.0 * grid.dx);
   const double cy = dt / (2.0 * grid.dy);
   const double dtdx = dt / grid.dx;
   const double dtdy = dt / grid.dy;
 
-  RowData row_curr, row_next;
+  RowData row_prev, row_curr, row_next;
   std::vector<Conserved> Fx_curr, Gy_prev, Gy_curr;
 
   build_row_predictor(grid, ng + 0, cx, cy, row_curr);
+  build_row_predictor(grid, ng + 1, cx, cy, row_next);
 
-  if (ny >= 2) {
-    build_row_predictor(grid, ng + 1, cx, cy, row_next);
-    compute_flux_y_between_rows(row_curr, row_next, Gy_prev);
-  } else {
-    RowData row_bottomghost;
-    build_row_predictor(grid, ng + 1, cx, cy, row_bottomghost);
-    compute_flux_y_between_rows(row_curr, row_bottomghost, Gy_prev);
-  }
+  compute_flux_y_between_rows(row_curr, row_next, Gy_prev);
 
   for (int j = 0; j < ny; ++j) {
     const int J = j + ng;
@@ -511,9 +527,9 @@ void advance_one_step_mpi(Grid& grid, double dt, MPI_Comm comm) {
     if (j < ny - 1) {
       compute_flux_y_between_rows(row_curr, row_next, Gy_curr);
     } else {
-      RowData row_top_or_bottom_ghost;
-      build_row_predictor(grid, ng + ny, cx, cy, row_top_or_bottom_ghost);
-      compute_flux_y_between_rows(row_curr, row_top_or_bottom_ghost, Gy_curr);
+      RowData row_topghost;
+      build_row_predictor(grid, ng + ny, cx, cy, row_topghost);
+      compute_flux_y_between_rows(row_curr, row_topghost, Gy_curr);
     }
 
     for (int i = 0; i < nx; ++i) {
@@ -527,6 +543,7 @@ void advance_one_step_mpi(Grid& grid, double dt, MPI_Comm comm) {
     }
 
     if (j < ny - 1) {
+      row_prev = std::move(row_curr);
       row_curr = std::move(row_next);
 
       if (j < ny - 2) {

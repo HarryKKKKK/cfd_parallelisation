@@ -5,6 +5,7 @@
 
 #include <mpi.h>
 #include <iostream>
+#include <stdexcept>
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
@@ -25,11 +26,18 @@ int main(int argc, char** argv) {
 
     Grid grid;
     grid.init(nx_global, mp.ny_local, ng, Lx, Ly, 0.0, y0_local);
+
+    // Force global spacing so local slabs match the serial global grid exactly
     grid.dx = dx;
     grid.dy = dy;
 
+    // Local initial condition
+    // This assumes initialize_shock_bubble(grid) uses the physical coordinates
+    // implied by grid origin + dx/dy, not just local indices.
     initialize_shock_bubble(grid);
 
+    // Fill ghost layers before first dt evaluation
+    apply_boundary_conditions_mpi(grid, mp);
     exchange_halo_y_mpi(grid, mp);
     apply_boundary_conditions_mpi(grid, mp);
 
@@ -62,12 +70,12 @@ int main(int argc, char** argv) {
     MPI_Reduce(&wall_local, &wall_max, 1, MPI_DOUBLE, MPI_MAX, 0, mp.comm);
 
     if (mp.rank == 0) {
-        std::cout << "mode=mpi"
-                  << " p=" << mp.size
-                  << " nx=" << nx_global
-                  << " ny=" << ny_global
-                  << " steps=" << step
-                  << " wall_seconds=" << wall_max
+        std::cout << "mode=mpi "
+                  << "p=" << mp.size << " "
+                  << "nx=" << nx_global << " "
+                  << "ny=" << ny_global << " "
+                  << "steps=" << step << " "
+                  << "wall_seconds=" << wall_max
                   << std::endl;
     }
 
