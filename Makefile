@@ -19,7 +19,8 @@ MPI_SOLVER_SRC    := src/mpi_solver.cpp
 # =========================
 # Main files
 # =========================
-MAIN_BASE              := main_baseline.cpp
+# MAIN_BASE              := main_baseline.cpp
+MAIN_BASE              := main_output.cpp
 MAIN_BASE_MPI          := main_baseline_mpi.cpp
 MAIN_BASE_SCALING      := main_base_scaling.cpp
 MAIN_BASE_SCALING_MPI  := main_base_scaling_mpi.cpp
@@ -47,7 +48,6 @@ mpi_base: mpi_base.exe
 serial_scaling: serial_scaling.exe
 omp_scaling: omp_scaling.exe
 mpi_scaling: mpi_scaling.exe
-
 # =========================
 # Baseline executables
 # =========================

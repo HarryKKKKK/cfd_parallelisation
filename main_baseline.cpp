@@ -5,15 +5,21 @@
 #include <chrono>
 #include <iostream>
 #include <iomanip>
+#include <cstdlib>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-int main() {
-    // fixed problem setup
-    const int nx = 500;
-    const int ny = 197;
+int main(int argc, char** argv) {
+    int nx = 2000;
+    int ny = 788;
+
+    if (argc >= 3) {
+        nx = std::atoi(argv[1]);
+        ny = std::atoi(argv[2]);
+    }
+
     const int ng = 2;
     const double Lx = 0.225;
     const double Ly = 0.089;
@@ -40,7 +46,6 @@ int main() {
     double t = 0.0;
 
     auto t0 = std::chrono::steady_clock::now();
-
     double dt = compute_dt(grid, cfl);
 
     std::cout << "[INIT] initial dt=" << dt << std::endl;
@@ -50,17 +55,15 @@ int main() {
             dt = t_end - t;
         }
 
-        if (step % 500 == 0) {
-            auto now = std::chrono::steady_clock::now();
-            double wall_so_far =
-                std::chrono::duration<double>(now - t0).count();
-
-            std::cout << "[LOOP] step=" << step
-                      << " t=" << t
-                      << " dt=" << dt
-                      << " wall_so_far=" << wall_so_far
-                      << std::endl;
-        }
+        // if (step % 1000 == 0) {
+        //     auto now = std::chrono::steady_clock::now();
+        //     double wall_so_far = std::chrono::duration<double>(now - t0).count();
+        //     std::cout << "[LOOP] step=" << step
+        //               << " t=" << t
+        //               << " dt=" << dt
+        //               << " wall_so_far=" << wall_so_far
+        //               << std::endl;
+        // }
 
         advance_one_step(grid, dt);
 
@@ -71,8 +74,7 @@ int main() {
     }
 
     auto t1 = std::chrono::steady_clock::now();
-    const double wall =
-        std::chrono::duration<double>(t1 - t0).count();
+    const double wall = std::chrono::duration<double>(t1 - t0).count();
 
 #ifdef _OPENMP
     const int p = omp_get_max_threads();

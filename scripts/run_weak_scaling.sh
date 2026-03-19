@@ -1,18 +1,23 @@
-#!/usr/bin/env bash
+#!/bin/bash
+#SBATCH --job-name=weak_scaling
+#SBATCH --partition=csc-mphil
+#SBATCH --clusters=CSC
+#SBATCH --account=hk597
+#SBATCH --nodes=1
+#SBATCH --ntasks=16
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=32G
+#SBATCH --time=06:00:00
+#SBATCH --output=weak_scaling_%j.out
+
 set -u -o pipefail
 
-# Usage:
-#   bash run_weak_scaling.sh [NX] [REPEAT]
-#
-# Example:
-#   bash run_weak_scaling.sh 500 5
-
-NX=${1:-500}
-REPEAT=${2:-5}
-
+# Optional environment overrides
 OMP_LIST="${OMP_LIST:-1 2 4 8 16}"
 MPI_LIST="${MPI_LIST:-1 2 4 8 16}"
+REPEATS="${REPEATS:-2}"
 
+# Make sure these point to your weak scaling executables
 SERIAL_EXE="${SERIAL_EXE:-./serial_scaling.exe}"
 OMP_EXE="${OMP_EXE:-./omp_scaling.exe}"
 MPI_EXE="${MPI_EXE:-./mpi_scaling.exe}"
@@ -24,7 +29,20 @@ RAW_CSV="${OUTDIR}/weak_scaling_raw.csv"
 LOGFILE="${OUTDIR}/weak_scaling.log"
 FAILFILE="${OUTDIR}/weak_scaling_failed.log"
 
-echo "mode,p,run_id,nx,copies_y,ny,wall_seconds,status" > "${RAW_CSV}"
+echo "===== Environment ====="
+date
+hostname
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
+echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
+echo "PWD=$PWD"
+echo "PATH=$PATH"
+which srun || true
+which mpirun || true
+which mpiexec || true
+echo "======================="
+
+# Added weak scaling specific columns: nx, copies_y, ny
+echo "mode,p,run,nx,copies_y,ny,wall_seconds,steps,status" > "${RAW_CSV}"
 : > "${LOGFILE}"
 : > "${FAILFILE}"
 
@@ -42,61 +60,96 @@ run_and_record() {
     local mode="$1"
     local p="$2"
     local run_id="$3"
-    local nx="$4"
-    local copies_y="$5"
-    shift 5
+    shift 3
 
-    local ny=$((197 * copies_y))
-
-    echo "Running mode=${mode} p=${p} run=${run_id} nx=${nx} copies_y=${copies_y} ny=${ny}" | tee -a "${LOGFILE}"
+    echo "Running mode=${mode} p=${p} run=${run_id}" | tee -a "${LOGFILE}"
 
     local output
     local rc=0
 
-    if output=$("$@" 2>&1); then
-        echo "${output}" >> "${LOGFILE}"
+    output=$("$@" 2>&1) || rc=$?
+    echo "${output}" >> "${LOGFILE}"
 
-        local wall
-        wall=$(echo "${output}" | extract_field wall_seconds)
+    local wall steps nx ny copies_y
+    wall=$(echo "${output}" | extract_field wall_seconds)
+    steps=$(echo "${output}" | extract_field steps)
+    nx=$(echo "${output}" | extract_field nx)
+    ny=$(echo "${output}" | extract_field ny)
+    copies_y=$(echo "${output}" | extract_field copies_y)
 
-        if [[ -z "${wall}" ]]; then
-            echo "FAILED: missing wall_seconds | mode=${mode} p=${p} run=${run_id}" | tee -a "${LOGFILE}" "${FAILFILE}"
-            echo "${mode},${p},${run_id},${nx},${copies_y},${ny},,missing_wall_seconds" >> "${RAW_CSV}"
-        else
-            echo "${mode},${p},${run_id},${nx},${copies_y},${ny},${wall},ok" >> "${RAW_CSV}"
-        fi
-    else
-        rc=$?
-        echo "${output}" >> "${LOGFILE}"
+    # Fallbacks in case execution failed before printing INIT
+    nx=${nx:-}
+    ny=${ny:-}
+    copies_y=${copies_y:-$p}
+    steps=${steps:-}
+
+    if [[ "${rc}" -ne 0 ]]; then
         echo "FAILED: exit_code=${rc} | mode=${mode} p=${p} run=${run_id}" | tee -a "${LOGFILE}" "${FAILFILE}"
-        echo "${mode},${p},${run_id},${nx},${copies_y},${ny},,failed_exit_${rc}" >> "${RAW_CSV}"
+        echo "${mode},${p},${run_id},${nx},${copies_y},${ny},,${steps},failed_exit_${rc}" >> "${RAW_CSV}"
+        return
     fi
+
+    if [[ -z "${wall}" ]]; then
+        echo "FAILED: missing wall_seconds | mode=${mode} p=${p} run=${run_id}" | tee -a "${LOGFILE}" "${FAILFILE}"
+        echo "${mode},${p},${run_id},${nx},${copies_y},${ny},,${steps},missing_wall_seconds" >> "${RAW_CSV}"
+        return
+    fi
+
+    echo "${mode},${p},${run_id},${nx},${copies_y},${ny},${wall},${steps},ok" >> "${RAW_CSV}"
+}
+
+summarise_mode() {
+    local mode="$1"
+    # Note: Column indices shifted because of nx, copies_y, ny
+    # $1=mode, $2=p, $7=wall_seconds, $9=status
+    awk -F, -v target="${mode}" '
+        NR==1 {next}
+        $1==target && $9=="ok" {
+            cnt[$2]++
+            sum[$2]+=$7
+            if (!($2 in min) || $7<min[$2]) min[$2]=$7
+        }
+        END {
+            for (p in cnt) {
+                printf "%s,p=%s,avg=%.6f,min=%.6f,n=%d\n", target, p, sum[p]/cnt[p], min[p], cnt[p]
+            }
+        }
+    ' "${RAW_CSV}" | sort -t= -k2,2n
 }
 
 echo "[checkpoint] start serial" | tee -a "${LOGFILE}"
-for r in $(seq 1 "${REPEAT}"); do
-    run_and_record "serial" 1 "${r}" "${NX}" 1 \
-        "${SERIAL_EXE}" "${NX}" 1
+for ((r=1; r<=REPEATS; r++)); do
+    # Pass 1 as copies_y for serial
+    run_and_record "serial" 1 "${r}" "${SERIAL_EXE}" 1
 done
 echo "[checkpoint] finished serial" | tee -a "${LOGFILE}"
 
 echo "[checkpoint] start omp" | tee -a "${LOGFILE}"
 for p in ${OMP_LIST}; do
-    for r in $(seq 1 "${REPEAT}"); do
-        run_and_record "omp" "${p}" "${r}" "${NX}" "${p}" \
-            env OMP_NUM_THREADS="${p}" "${OMP_EXE}" "${NX}" "${p}"
+    for ((r=1; r<=REPEATS; r++)); do
+        # Pass $p as copies_y for OpenMP
+        run_and_record "omp" "${p}" "${r}" \
+            env OMP_NUM_THREADS="${p}" "${OMP_EXE}" "${p}"
     done
 done
 echo "[checkpoint] finished omp" | tee -a "${LOGFILE}"
 
 echo "[checkpoint] start mpi" | tee -a "${LOGFILE}"
 for p in ${MPI_LIST}; do
-    for r in $(seq 1 "${REPEAT}"); do
-        run_and_record "mpi" "${p}" "${r}" "${NX}" "${p}" \
-            mpirun -np "${p}" "${MPI_EXE}" "${NX}" "${p}"
+    for ((r=1; r<=REPEATS; r++)); do
+        # Pass $p as copies_y for MPI
+        run_and_record "mpi" "${p}" "${r}" \
+            mpiexec -n "${p}" "${MPI_EXE}" "${p}"
     done
 done
 echo "[checkpoint] finished mpi" | tee -a "${LOGFILE}"
+
+echo "" | tee -a "${LOGFILE}"
+echo "===== SUMMARY =====" | tee -a "${LOGFILE}"
+summarise_mode "serial" | tee -a "${LOGFILE}"
+summarise_mode "omp" | tee -a "${LOGFILE}"
+summarise_mode "mpi" | tee -a "${LOGFILE}"
+echo "===================" | tee -a "${LOGFILE}"
 
 echo "Done."
 echo "Raw data:   ${RAW_CSV}"

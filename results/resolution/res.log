@@ -1,0 +1,47 @@
+[checkpoint] start serial
+Running mode=serial p=1 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=serial p=1 nx=1000 ny=394 steps=14229 wall_seconds=883.321522426
+[checkpoint] start omp
+Running mode=omp p=1 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=omp p=1 nx=1000 ny=394 steps=14229 wall_seconds=850.820516023
+Running mode=omp p=2 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=omp p=2 nx=1000 ny=394 steps=14229 wall_seconds=433.044476707
+Running mode=omp p=4 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=omp p=4 nx=1000 ny=394 steps=14229 wall_seconds=238.839728472
+Running mode=omp p=8 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=omp p=8 nx=1000 ny=394 steps=14229 wall_seconds=147.291970435
+Running mode=omp p=16 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=omp p=16 nx=1000 ny=394 steps=14229 wall_seconds=129.607582637
+[checkpoint] start mpi
+Running mode=mpi p=1 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=mpi p=1 nx=1000 ny=394 steps=14229 wall_seconds=885.900742345
+Running mode=mpi p=2 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=mpi p=2 nx=1000 ny=394 steps=14229 wall_seconds=445.489187256
+Running mode=mpi p=4 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=mpi p=4 nx=1000 ny=394 steps=14229 wall_seconds=229.346677758
+Running mode=mpi p=8 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=mpi p=8 nx=1000 ny=394 steps=14229 wall_seconds=122.090432042
+Running mode=mpi p=16 run=1 (nx=1000, ny=394)
+[INIT] nx=1000 ny=394 ng=2 Lx=0.225 Ly=0.089 dx=0.000225 dy=0.000225888324873 cfl=0.4 t_end=0.0011741
+[INIT] initial dt=1.10541937437e-07
+mode=mpi p=16 nx=1000 ny=394 steps=14229 wall_seconds=72.828503303

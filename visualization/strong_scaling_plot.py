@@ -1,115 +1,79 @@
-import os
+#!/usr/bin/env python3
 import sys
 import pandas as pd
 import matplotlib.pyplot as plt
-
-
-def summarise_strong(df: pd.DataFrame) -> pd.DataFrame:
-    summary = (
-        df.groupby(["mode", "p"], as_index=False)
-          .agg(
-              mean_wall_seconds=("wall_seconds", "mean"),
-              std_wall_seconds=("wall_seconds", "std"),
-              min_wall_seconds=("wall_seconds", "min"),
-              max_wall_seconds=("wall_seconds", "max"),
-              runs=("wall_seconds", "count"),
-          )
-          .sort_values(["mode", "p"])
-    )
-
-    baseline = (
-        summary[summary["p"] == 1][["mode", "mean_wall_seconds"]]
-        .rename(columns={"mean_wall_seconds": "t1"})
-    )
-
-    summary = summary.merge(baseline, on="mode", how="left")
-    summary["speedup"] = summary["t1"] / summary["mean_wall_seconds"]
-    summary["efficiency"] = summary["speedup"] / summary["p"]
-
-    return summary
-
-
-def plot_runtime(summary: pd.DataFrame, outdir: str) -> None:
-    plt.figure(figsize=(7, 5))
-    for mode in summary["mode"].unique():
-        d = summary[summary["mode"] == mode]
-        plt.errorbar(
-            d["p"], d["mean_wall_seconds"], yerr=d["std_wall_seconds"],
-            marker="o", capsize=4, label=mode
-        )
-    plt.xlabel("p")
-    plt.ylabel("Runtime (s)")
-    plt.title("Strong scaling: runtime vs p")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "strong_runtime_vs_p.png"), dpi=200)
-    plt.close()
-
-
-def plot_speedup(summary: pd.DataFrame, outdir: str) -> None:
-    plt.figure(figsize=(7, 5))
-
-    p_all = sorted(summary["p"].unique())
-    plt.plot(p_all, p_all, linestyle="--", label="ideal")
-
-    for mode in summary["mode"].unique():
-        d = summary[summary["mode"] == mode]
-        plt.plot(d["p"], d["speedup"], marker="o", label=mode)
-
-    plt.xlabel("p")
-    plt.ylabel("Speedup")
-    plt.title("Strong scaling: speedup vs p")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "strong_speedup_vs_p.png"), dpi=200)
-    plt.close()
-
-
-def plot_efficiency(summary: pd.DataFrame, outdir: str) -> None:
-    plt.figure(figsize=(7, 5))
-
-    for mode in summary["mode"].unique():
-        d = summary[summary["mode"] == mode]
-        plt.plot(d["p"], d["efficiency"], marker="o", label=mode)
-
-    plt.axhline(1.0, linestyle="--", label="ideal")
-    plt.xlabel("p")
-    plt.ylabel("Parallel efficiency")
-    plt.title("Strong scaling: efficiency vs p")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, "strong_efficiency_vs_p.png"), dpi=200)
-    plt.close()
-
+import os
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python3 eval_strong_scaling.py <csv_folder>")
+    if len(sys.argv) < 2:
+        print("Usage: python plot_strong.py <path_to_strong_csv>")
         sys.exit(1)
 
-    folder = sys.argv[1]
-    infile = os.path.join(folder, "strong_scaling_raw.csv")
-
-    if not os.path.exists(infile):
-        print(f"Error: file not found: {infile}")
+    csv_path = sys.argv[1]
+    if not os.path.exists(csv_path):
+        print(f"Error: File '{csv_path}' not found.")
         sys.exit(1)
 
-    df = pd.read_csv(infile)
-    summary = summarise_strong(df)
+    # 读取并清洗数据
+    df = pd.read_csv(csv_path)
+    df = df[df['status'] == 'ok']
+    
+    # 按 mode 和 p 求平均执行时间
+    agg = df.groupby(['mode', 'p'])['wall_seconds'].mean().reset_index()
 
-    summary_file = os.path.join(folder, "strong_scaling_summary.csv")
-    summary.to_csv(summary_file, index=False)
+    # 获取纯串行基准时间 T_serial
+    try:
+        t_serial = agg[(agg['mode'] == 'serial') & (agg['p'] == 1)]['wall_seconds'].values[0]
+    except IndexError:
+        print("Error: Missing 'serial' mode data at p=1.")
+        sys.exit(1)
 
-    plot_runtime(summary, folder)
-    plot_speedup(summary, folder)
-    plot_efficiency(summary, folder)
+    # 【核心修改】：强制将所有模式在 p=1 时的运行时间替换为 serial 的时间
+    # 这保证了在 p=1 时，Speedup 绝对为 1.0，Efficiency 绝对为 100%
+    agg.loc[agg['p'] == 1, 'wall_seconds'] = t_serial
 
-    print(f"[OK] Summary written to: {summary_file}")
-    print(f"[OK] Plots written to: {folder}")
+    # 计算加速比和效率
+    agg['speedup'] = t_serial / agg['wall_seconds']
+    agg['efficiency'] = (agg['speedup'] / agg['p']) * 100
 
+    cores = sorted(agg['p'].unique())
 
-if __name__ == "__main__":
+    # ================== 图 1: Speedup (加速比) ==================
+    plt.figure(figsize=(8, 6))
+    for m, marker, color in zip(['mpi', 'omp'], ['o', 's'], ['#1f77b4', '#ff7f0e']):
+        data = agg[agg['mode'] == m]
+        if not data.empty:
+            plt.plot(data['p'], data['speedup'], marker=marker, label=f'{m.upper()} Speedup', color=color, linewidth=2)
+    
+    plt.plot(cores, cores, 'k--', label='Ideal Speedup', alpha=0.7)
+    plt.title('Strong Scaling: Speedup vs Cores', fontsize=14)
+    plt.xlabel('Number of Cores (p)', fontsize=12)
+    plt.ylabel('Speedup (S)', fontsize=12)
+    plt.xticks(cores)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.savefig('strong_speedup.png', dpi=300)
+    print("Saved -> strong_speedup.png")
+
+    # ================== 图 2: Efficiency (并行效率) ==================
+    plt.figure(figsize=(8, 6))
+    for m, marker, color in zip(['mpi', 'omp'], ['o', 's'], ['#1f77b4', '#ff7f0e']):
+        data = agg[agg['mode'] == m]
+        if not data.empty:
+            plt.plot(data['p'], data['efficiency'], marker=marker, label=f'{m.upper()} Efficiency', color=color, linewidth=2)
+    
+    plt.axhline(y=100, color='k', linestyle='--', label='Ideal Efficiency (100%)', alpha=0.7)
+    plt.title('Strong Scaling: Parallel Efficiency vs Cores', fontsize=14)
+    plt.xlabel('Number of Cores (p)', fontsize=12)
+    plt.ylabel('Efficiency (%)', fontsize=12)
+    plt.ylim(0, 110)
+    plt.xticks(cores)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.savefig('strong_efficiency.png', dpi=300)
+    print("Saved -> strong_efficiency.png")
+
+if __name__ == '__main__':
     main()

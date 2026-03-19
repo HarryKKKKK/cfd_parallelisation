@@ -14,7 +14,7 @@ constexpr bool ENABLE_OUTPUT = true;
 
 int main() {
 
-    const std::string out_dir = "res/serial/hllc";
+    const std::string out_dir = "res/serial/";
     if (ENABLE_OUTPUT) {
         std::filesystem::create_directories(out_dir);
     }

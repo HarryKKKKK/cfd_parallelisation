@@ -6,12 +6,16 @@
 #include <mpi.h>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
 
-    // fixed parameters
-    const int nx_base = 500;
+    int world_rank, world_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    const int nx_global = 500;
     const int ny_base = 197;
     const int ng = 2;
     const double Lx = 0.225;
@@ -19,26 +23,14 @@ int main(int argc, char** argv) {
     const double cfl = 0.4;
     const double t_end = 0.0011741;
 
-    // variable parameters for scaling
-    int nx_global = nx_base;
-    int copies_y = 1;
-
-    // Usage:
-    //   mpirun -np p ./mpi_scaling.exe [nx] [copies_y]
-
+    int copies_y = world_size; 
     if (argc >= 2) {
-        nx_global = std::atoi(argv[1]);
-    }
-    if (argc >= 3) {
-        copies_y = std::atoi(argv[2]);
+        copies_y = std::atoi(argv[1]);
     }
 
-    int world_rank = 0;
-    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-
-    if (nx_global <= 0 || copies_y <= 0) {
+    if (copies_y <= 0) {
         if (world_rank == 0) {
-            std::cerr << "Error: nx and copies_y must be positive.\n";
+            std::cerr << "Error: copies_y must be positive.\n";
         }
         MPI_Finalize();
         return 1;
@@ -63,6 +55,21 @@ int main(int argc, char** argv) {
     exchange_halo_y_mpi(grid, mp);
     apply_boundary_conditions_mpi(grid, mp);
 
+    if (mp.rank == 0) {
+        std::cout << std::setprecision(12);
+        std::cout << "[INIT] nx=" << nx_global
+                  << " ny=" << ny_global
+                  << " copies_y=" << copies_y
+                  << " ng=" << ng
+                  << " Lx=" << Lx
+                  << " Ly=" << Ly
+                  << " dx=" << grid.dx
+                  << " dy=" << grid.dy
+                  << " cfl=" << cfl
+                  << " t_end=" << t_end
+                  << std::endl;
+    }
+
     int step = 0;
     double t = 0.0;
 
@@ -71,9 +78,23 @@ int main(int argc, char** argv) {
 
     double dt = compute_dt_mpi(grid, mp, cfl);
 
+    if (mp.rank == 0) {
+        std::cout << "[INIT] initial dt=" << dt << std::endl;
+    }
+
     while (t < t_end) {
         if (t + dt > t_end) {
             dt = t_end - t;
+        }
+
+        // 仅由 Rank 0 负责打印 LOOP 进度条，使用 MPI_Wtime
+        if (step % 500 == 0 && mp.rank == 0) {
+            double wall_so_far = MPI_Wtime() - t0;
+            std::cout << "[LOOP] step=" << step
+                      << " t=" << t
+                      << " dt=" << dt
+                      << " wall_so_far=" << wall_so_far
+                      << std::endl;
         }
 
         advance_one_step_mpi(grid, mp, dt);
